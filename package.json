@@ -1,0 +1,28 @@
+{
+  "name": "lotus-audio-emotion-backend",
+  "version": "1.0.0",
+  "description": "Express backend that transcribes uploaded audio and generates emotion-based AI responses.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": [
+    "express",
+    "openai",
+    "audio",
+    "transcription"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "multer": "^2.0.2",
+    "openai": "^6.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
