@@ -4,7 +4,10 @@ import { EmotionAvatarTile } from "./components/EmotionAvatarTile";
 import { CallSetupPanel } from "./components/CallSetupPanel";
 import { LiveResponsePanel } from "./components/LiveResponsePanel";
 import { LocalCameraPreview } from "./components/LocalCameraPreview";
-import { AnalysisResponse, AgoraSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech } from "./lib/api";
+import { AnalysisResponse, AgoraSession, AgoraAgentSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech, startAgoraAgent, stopAgoraAgent } from "./lib/api";
+import AgoraRTM from "agora-rtm";
+import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents } from "./lib/conversational-ai-api";
+import type { TStateChangeEvent, TModuleError, ITranscriptHelperItem, IUserTranscription, IAgentTranscription } from "./lib/conversational-ai-api";
 import { EMOTIONS, LIVE_CHUNK_DURATION_MS, LIVE_CHUNK_GAP_MS, MIN_ANALYSIS_BLOB_SIZE_BYTES } from "./lib/constants";
 import { SupportedEmotion } from "./lib/emotions";
 import { TranscriptEntry } from "./lib/types";
@@ -38,7 +41,8 @@ function App() {
   const localContainerRef = useRef<HTMLDivElement>(null);
   const cameraTrackRef = useRef<ICameraVideoTrack | null>(null);
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const agentSessionRef = useRef<AgoraSession | null>(null);
+  const agentSessionRef = useRef<AgoraAgentSession | null>(null);
+  const rtmClientRef = useRef<InstanceType<typeof AgoraRTM.RTM> | null>(null);
   const hasAutoJoinedRef = useRef(false);
   const selectedEmotionRef = useRef<SupportedEmotion>("joy");
   const joinedRef = useRef(false);
@@ -53,6 +57,8 @@ function App() {
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentSession, setAgentSession] = useState<AgoraAgentSession | null>(null);
+  const [agentState, setAgentState] = useState<string>("idle");
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [session, setSession] = useState<AgoraSession | null>(null);
   const [channelInput, setChannelInput] = useState(getChannelFromLocation());
@@ -277,6 +283,23 @@ function App() {
       if (!client) throw new Error(clientError || "Agora RTC client is unavailable.");
       cleanupLocalTracks();
       clearVideoContainers();
+
+      // Stop agent (best-effort)
+      if (agentSessionRef.current) {
+        try { await stopAgoraAgent(backendBaseUrl, agentSessionRef.current.agent_id); } catch { /* best-effort */ }
+        agentSessionRef.current = null;
+        setAgentSession(null);
+      }
+
+      // Cleanup ConversationalAI (best-effort)
+      try { const convAI = ConversationalAIAPI.getInstance(); convAI.unsubscribe(); convAI.destroy(); } catch { /* not initialized */ }
+
+      // Cleanup RTM (best-effort)
+      if (rtmClientRef.current) {
+        try { await rtmClientRef.current.logout(); } catch { /* best-effort */ }
+        rtmClientRef.current = null;
+      }
+
       await client.leave();
       setJoined(false);
       setSession(null);
@@ -331,6 +354,50 @@ function App() {
       renderLocalPreview(nextCameraTrack);
       setSession({ ...nextSession, uid: joinedUid });
       setJoined(true);
+
+      // Start agent + RTM (non-fatal — call still proceeds if this fails)
+      try {
+        const agentSess = await startAgoraAgent(backendBaseUrl, {
+          channel: nextSession.channel,
+          uid: String(joinedUid),
+          emotion: selectedEmotionRef.current,
+        });
+        agentSessionRef.current = agentSess;
+        setAgentSession(agentSess);
+        appendLog(`Agent started as uid ${agentSess.agentUid}.`);
+
+        const rtmClient = new AgoraRTM.RTM(nextSession.appId, String(joinedUid));
+        await rtmClient.login({ token: nextSession.token ?? undefined });
+        await rtmClient.subscribe(nextSession.channel);
+        rtmClientRef.current = rtmClient;
+
+        const convAI = ConversationalAIAPI.init({
+          rtcEngine: client,
+          rtmEngine: rtmClient,
+          renderMode: ETranscriptHelperMode.WORD,
+          enableLog: true,
+        });
+        convAI.on(EConversationalAIAPIEvents.AGENT_STATE_CHANGED, (_uid: string, event: TStateChangeEvent) => {
+          setAgentState(event.state);
+          appendLog(`Agent state: ${event.state}`);
+        });
+        convAI.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (history: ITranscriptHelperItem<Partial<IUserTranscription | IAgentTranscription>>[]) => {
+          const last = history[history.length - 1];
+          if (last) {
+            setTranscriptEntries((prev) =>
+              [{ id: String(Date.now()), createdAt: getTimeLabel(), transcript: last.text ?? "", emotion: selectedEmotionRef.current }, ...prev].slice(0, 6)
+            );
+          }
+        });
+        convAI.on(EConversationalAIAPIEvents.AGENT_ERROR, (_uid: string, err: TModuleError) => {
+          setAgentError(err.message);
+          appendLog(`Agent error: ${err.message}`);
+        });
+        convAI.subscribeMessage(nextSession.channel);
+      } catch (agentErr) {
+        appendLog(`Agent/RTM init failed (call continues): ${agentErr instanceof Error ? agentErr.message : "unknown error"}`);
+      }
+
       resetAnalysisState();
       appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${joinedUid}.`);
     } catch (err) {
@@ -409,6 +476,8 @@ function App() {
   };
 
   void agentError; // used for future agent error surfacing
+  void agentSession; // used for future agent session surfacing
+  void agentState; // used for future agent state surfacing
 
   return (
     <main className="app-shell">
