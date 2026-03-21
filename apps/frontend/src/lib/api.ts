@@ -185,3 +185,36 @@ export async function chatWithBackend(
 
   return (await response.json()) as ChatResponse;
 }
+
+export async function sendChatMessage(
+  backendBaseUrl: string,
+  message: string,
+  emotion: string,
+  sessionId?: string
+) {
+  return chatWithBackend(backendBaseUrl, message, emotion, sessionId);
+}
+
+export async function requestAvatarSpeech(
+  backendBaseUrl: string,
+  text: string,
+  emotion: string
+) {
+  const url = new URL("/avatar/speech", backendBaseUrl);
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      emotion,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return await response.blob();
+}
