@@ -4,7 +4,7 @@ import { EmotionAvatarTile } from "./components/EmotionAvatarTile";
 import { CallSetupPanel } from "./components/CallSetupPanel";
 import { LiveResponsePanel } from "./components/LiveResponsePanel";
 import { LocalCameraPreview } from "./components/LocalCameraPreview";
-import { AnalysisResponse, AgoraSession, AgoraAgentSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech, startAgoraAgent, stopAgoraAgent } from "./lib/api";
+import { AnalysisResponse, AgoraSession, AgoraAgentSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech, startAgoraAgent, stopAgoraAgent, updateAgoraAgent } from "./lib/api";
 import type { AvatarSpeechPerformance, AvatarSpeechResponse } from "./lib/api";
 import AgoraRTM from "agora-rtm";
 import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents } from "./lib/conversational-ai-api";
@@ -12,6 +12,7 @@ import type { TStateChangeEvent, TModuleError, ITranscriptHelperItem, IUserTrans
 import { EMOTIONS, LIVE_CHUNK_DURATION_MS, LIVE_CHUNK_GAP_MS, MIN_ANALYSIS_BLOB_SIZE_BYTES } from "./lib/constants";
 import { SupportedEmotion, SUPPORTED_EMOTIONS } from "./lib/emotions";
 import { TranscriptEntry } from "./lib/types";
+import { EmotionAvatar } from "./components/EmotionAvatar";
 
 const envAppId = import.meta.env.VITE_AGORA_APP_ID ?? "";
 const envChannel = import.meta.env.VITE_AGORA_CHANNEL ?? "reflexia";
@@ -29,6 +30,7 @@ function getSupportedLiveAudioMimeType() { const mimeTypes = ["audio/webm;codecs
 function getLiveAudioExtension(mimeType: string) { return mimeType.includes("mp4") ? "mp4" : "webm"; }
 function normalizeTrackVolume(level: number) { return Math.max(0, Math.min(Math.round(level * 100), 100)); }
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(value, max)); }
+function getAudioMeterSegments(level: number) { const normalizedLevel = Math.max(0, Math.min(level, 100)); return Array.from({ length: 10 }, (_, index) => normalizedLevel >= (index + 1) * 10); }
 function getAvatarSpeechDuration(text: string) {
   const trimmed = text.trim();
   if (!trimmed) return 0;
@@ -177,11 +179,30 @@ function App() {
   const [localAudioLevel, setLocalAudioLevel] = useState(0);
   const [remoteAudioLevel, setRemoteAudioLevel] = useState(0);
   const [audioSignalDetected, setAudioSignalDetected] = useState(false);
+  const [avatarSpeaking, setAvatarSpeaking] = useState(false);
+  const [avatarSpeechLevel, setAvatarSpeechLevel] = useState(0);
+  const [avatarSpeechSource, setAvatarSpeechSource] = useState<AvatarSpeechSource>("idle");
+  const [avatarResponseText, setAvatarResponseText] = useState("");
+  const [avatarSpeechStartedAt, setAvatarSpeechStartedAt] = useState(0);
+  const [avatarSpeechPerformance, setAvatarSpeechPerformance] = useState<AvatarSpeechPerformance | null>(null);
+  const [isEmotionSwitching, setIsEmotionSwitching] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
   const [currentTime, setCurrentTime] = useState(getTimeLabel());
   const currentEmotion = EMOTIONS.find((emotion) => emotion.key === selectedEmotion) ?? EMOTIONS[0];
-  const avatarSignalLevel = Math.max(localAudioLevel, remoteAudioLevel);
+  const localMeterSegments = getAudioMeterSegments(localAudioLevel);
+  const avatarStageSpeaking = avatarSpeaking || remoteAudioLevel > 6 || agentState === "speaking";
+  const avatarSignalLevel = Math.max(remoteAudioLevel, avatarSpeechLevel);
+  const avatarMeterSegments = getAudioMeterSegments(avatarSignalLevel);
+  const avatarStageStatus = !joined
+    ? "idle"
+    : avatarStageSpeaking
+      ? (avatarSpeechSource === "voice" || remoteAudioLevel > 8 ? "speaking" : "responding")
+      : isAnalyzing || agentState === "thinking"
+        ? "thinking"
+        : isListeningLive || agentState === "listening"
+          ? "listening"
+          : "ready";
   const micStatus = !joined ? "offline" : !micEnabled ? "muted" : localAudioLevel > 8 ? "speaking" : "live";
   const combinedError = connectionError || agentError || analysisError || clientError;
 
@@ -224,7 +245,7 @@ function App() {
     if (joined && cameraTrackRef.current) {
       renderLocalPreview(cameraTrackRef.current);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joined]);
 
   useEffect(() => {
@@ -614,7 +635,7 @@ function App() {
       if (!microphoneTrack || !nextCameraTrack) {
         if (nextCameraTrack) { nextCameraTrack.stop(); nextCameraTrack.close(); cameraTrackRef.current = null; }
         if (microphoneTrack) { microphoneTrack.stop(); microphoneTrack.close(); micTrackRef.current = null; }
-        [microphoneTrack, nextCameraTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+        [microphoneTrack, nextCameraTrack] = await AgoraRTC.createMicrophoneAndCameraTracks({ ANS: true, AEC: true, AGC: true });
       }
       micTrackRef.current = microphoneTrack;
       cameraTrackRef.current = nextCameraTrack;
@@ -761,7 +782,7 @@ function App() {
     if (!joined) {
       if (!micTrackRef.current) {
         try {
-          const track = await AgoraRTC.createMicrophoneAudioTrack();
+          const track = await AgoraRTC.createMicrophoneAudioTrack({ ANS: true, AEC: true, AGC: true });
           micTrackRef.current = track;
           setMicTrack(track);
           setMicEnabled(true);
@@ -785,21 +806,47 @@ function App() {
     appendLog(nextEnabled ? "Microphone enabled." : "Microphone muted.");
   };
 
-  const selectEmotion = (emotion: SupportedEmotion) => {
+  const selectEmotion = async (emotion: SupportedEmotion) => {
     setAnalysisError(null);
     setSelectedEmotion(emotion);
+
+    if (!joined || !agentSessionRef.current) return;
+
+    setIsEmotionSwitching(true);
+    try {
+      const currentAgentId = agentSessionRef.current.agent_id;
+      const channel = session!.channel;
+      const uid = String(session!.uid);
+
+      await stopAgoraAgent(backendBaseUrl, currentAgentId);
+      agentSessionRef.current = null;
+      setAgentSession(null);
+      appendLog(`Emotion switch: stopped agent ${currentAgentId}.`);
+
+      const newAgentSess = await startAgoraAgent(backendBaseUrl, { channel, uid, emotion });
+      agentSessionRef.current = newAgentSess;
+      setAgentSession(newAgentSess);
+      appendLog(`Emotion switch: started new agent ${newAgentSess.agent_id} with emotion ${emotion}.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to switch emotion.";
+      setAgentError(message);
+      appendLog(`Emotion switch failed: ${message}`);
+    } finally {
+      setIsEmotionSwitching(false);
+    }
   };
 
   // Suppress unused variable warnings for vars kept for future use
   void agentSession;
   void agentState;
   void logs;
+  void updateAgoraAgent;
 
   /* ═══════════════════════════════════
      EMOTION PICKER (shared between pre-join and sidebar)
      ═══════════════════════════════════ */
   const emotionPicker = (
-    <div className="emotion-picker-grid">
+    <div className={`emotion-picker-grid${isEmotionSwitching ? " emotion-picker-switching" : ""}`}>
       {SUPPORTED_EMOTIONS.map((emotion) => {
         const config = EMOTIONS.find((e) => e.key === emotion) ?? EMOTIONS[0];
         const isSelected = selectedEmotion === emotion;
@@ -808,10 +855,12 @@ function App() {
             key={emotion}
             type="button"
             className={isSelected ? "emotion-option selected" : "emotion-option"}
-            onClick={() => selectEmotion(emotion)}
+            onClick={() => { void selectEmotion(emotion); }}
+            disabled={isEmotionSwitching}
           >
             <span className="emotion-option-face">{config.emoji}</span>
             <span>{config.title}</span>
+            {isEmotionSwitching && isSelected && <span className="emotion-switching-indicator" aria-label="Switching…" />}
           </button>
         );
       })}
@@ -910,8 +959,19 @@ function App() {
             />
             <EmotionAvatarTile
               currentEmotion={currentEmotion}
-              audioSignalDetected={audioSignalDetected}
+              selectedEmotion={selectedEmotion}
+              avatarSpeaking={avatarSpeaking}
+              avatarStageStatus={avatarStageStatus}
               avatarSignalLevel={avatarSignalLevel}
+              avatarMeterSegments={avatarMeterSegments}
+              avatarSpeechSource={avatarSpeechSource}
+              avatarResponseText={avatarResponseText}
+              avatarSpeechStartedAt={avatarSpeechStartedAt}
+              avatarSpeechPerformance={avatarSpeechPerformance}
+              joined={joined}
+              session={session}
+              channelInput={channelInput}
+              onSelectEmotion={selectEmotion}
             />
           </div>
 

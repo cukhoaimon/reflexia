@@ -1159,9 +1159,15 @@ export function EmotionAvatar({
     frameId = window.requestAnimationFrame(draw);
     window.addEventListener("resize", resize);
 
+    const resizeObserver = new ResizeObserver(resize);
+    if (canvas.parentElement) {
+      resizeObserver.observe(canvas.parentElement);
+    }
+
     return () => {
       window.cancelAnimationFrame(frameId);
       window.removeEventListener("resize", resize);
+      resizeObserver.disconnect();
     };
   }, []);
 

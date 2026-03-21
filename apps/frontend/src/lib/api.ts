@@ -180,6 +180,25 @@ export async function stopAgoraAgent(backendBaseUrl: string, agentId: string) {
   return (await response.json()) as { status?: string };
 }
 
+export async function updateAgoraAgent(
+  backendBaseUrl: string,
+  agentId: string,
+  emotion: string
+) {
+  const url = new URL(`/agora/agent/${agentId}/update`, backendBaseUrl);
+  const response = await fetch(url.toString(), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emotion }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return (await response.json()) as { status?: string };
+}
+
 export async function analyzeLiveAudio(
   backendBaseUrl: string,
   file: File,
