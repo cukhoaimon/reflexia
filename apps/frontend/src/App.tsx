@@ -57,21 +57,21 @@ function App() {
   const remoteContainerRef = useRef<HTMLDivElement>(null);
   const cameraTrackRef = useRef<ICameraVideoTrack | null>(null);
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const liveRecorderRef = useRef<MediaRecorder | null>(null);
-  const liveAudioStreamRef = useRef<MediaStream | null>(null);
-  const liveChunkTimeoutRef = useRef<number | null>(null);
-  const liveChunkPartsRef = useRef<Blob[]>([]);
-  const liveLoopEnabledRef = useRef(false);
-  const liveRequestSequenceRef = useRef(0);
+  const rtmClientRef = useRef<RTMClient | null>(null);
+  const conversationalApiRef = useRef<ConversationalAIAPI | null>(null);
+  const agentSessionRef = useRef<AgoraAgentSession | null>(null);
+  const selectedEmotionRef = useRef<SupportedEmotion>("joy");
+  const lastAppliedEmotionRef = useRef<SupportedEmotion | null>(null);
   const hasAutoJoinedRef = useRef(false);
-  const selectedEmotionsRef = useRef<SupportedEmotion[]>([]);
-  const previousEmotionKeyRef = useRef("");
   const joinedRef = useRef(false);
+  const startingAgentRef = useRef(false);
   const [joined, setJoined] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
   const [session, setSession] = useState<AgoraSession | null>(null);
+  const [agentSession, setAgentSession] = useState<AgoraAgentSession | null>(null);
+  const [agentState, setAgentState] = useState<EAgentState | null>(null);
   const [channelInput, setChannelInput] = useState(getChannelFromLocation());
   const [cameraTrack, setCameraTrack] = useState<ICameraVideoTrack | null>(null);
   const [micTrack, setMicTrack] = useState<IMicrophoneAudioTrack | null>(null);
@@ -199,7 +199,6 @@ function App() {
     if (statusMessage) setLiveStatus(statusMessage);
   };
   const cleanupLocalTracks = () => {
-    stopLiveListeningLoop("Live listening stopped.");
     cameraTrackRef.current?.stop();
     cameraTrackRef.current?.close();
     micTrackRef.current?.stop();
@@ -306,9 +305,12 @@ function App() {
       await client.leave();
       setJoined(false);
       setSession(null);
+      setTranscriptRows([]);
+      setLatestAgentText("");
+      setLiveStatus("Join the channel to start the interactive meeting.");
       appendLog("Left the Agora channel.");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to leave channel.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to leave channel.";
       setConnectionError(message);
     }
   };
@@ -323,7 +325,6 @@ function App() {
     catch (fetchError) {
       const message = fetchError instanceof Error ? fetchError.message : "Request to backend session endpoint failed.";
       appendLog(`Backend session endpoint failed: ${message}`);
-      appendLog("Falling back to frontend Agora env values.");
     }
     if (!envAppId) throw new Error("Missing Agora config. Set AGORA_APP_ID on the backend or VITE_AGORA_APP_ID in the frontend.");
     return { appId: envAppId, channel: channelName, token: envToken, uid: parseEnvUid(envUidRaw), source: "frontend-env" } satisfies AgoraSession;
@@ -357,13 +358,25 @@ function App() {
       renderLocalPreview(nextCameraTrack);
       setSession({ ...nextSession, uid: joinedUid });
       setJoined(true);
-      setTranscriptEntries([]);
-      setAnalysisResult(null);
-      setConversationSessionId(null);
-      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${joinedUid}.`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to join channel.";
+      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${normalizedUid}.`);
+      await startAgentSession(selectedEmotionRef.current, {
+        sessionOverride: activeSession,
+        joinedOverride: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to join channel.";
       setConnectionError(message);
+      appendLog(`Join failed: ${message}`);
+      await detachConversationalApi();
+      await disconnectRtm();
+      cleanupLocalTracks();
+      if (client) {
+        try {
+          await client.leave();
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
     } finally {
       setConnecting(false);
     }
