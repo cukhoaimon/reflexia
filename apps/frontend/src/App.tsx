@@ -599,6 +599,21 @@ function App() {
     return () => { void leaveChannel(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Stop the backend agent when the user closes/refreshes the tab.
+  // fetch with keepalive=true survives page unload; async await is not available here.
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (agentSessionRef.current) {
+        const url = new URL(`/agora/agent/${agentSessionRef.current.agent_id}/leave`, backendBaseUrl);
+        void fetch(url.toString(), { method: "POST", keepalive: true });
+      }
+      if (client) void client.leave();
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => () => {
     clearAvatarSpeechTimeout();
     stopAvatarAudioPlayback();
@@ -1045,6 +1060,9 @@ function App() {
 
         {/* ── Sidebar ── */}
         {sidebarOpen && (
+          <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+        )}
+        {sidebarOpen && (
           <aside className="sidebar">
             <div className="sidebar-header">
               <span className="sidebar-title">Controls</span>
@@ -1082,16 +1100,6 @@ function App() {
                   {currentEmotion.emoji} {currentEmotion.title}
                 </p>
                 {emotionPicker}
-              </div>
-            )}
-            {!isDebugMode && (
-              <div className="sidebar-section" style={{ flex: 1, overflow: "auto" }}>
-                <LiveResponsePanel
-                  analysisResult={analysisResult}
-                  transcriptEntries={transcriptEntries}
-                  isAnalyzing={isAnalyzing}
-                  liveStatus={liveStatus}
-                />
               </div>
             )}
           </aside>
