@@ -311,6 +311,12 @@ dd {
   margin-top: 1rem;
 }
 
+.agent-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem;
+}
+
 .analysis-card {
   padding: 1rem;
   border-radius: 18px;
@@ -349,6 +355,16 @@ dd {
   border-radius: 18px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   background: rgba(255, 255, 255, 0.72);
+}
+
+.timeline-card-agent {
+  border-color: rgba(15, 118, 110, 0.25);
+  background: rgba(240, 253, 250, 0.85);
+}
+
+.timeline-card-user {
+  border-color: rgba(30, 64, 175, 0.18);
+  background: rgba(239, 246, 255, 0.8);
 }
 
 .timeline-meta {

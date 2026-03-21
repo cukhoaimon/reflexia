@@ -5,31 +5,52 @@ import AgoraRTC, {
   ICameraVideoTrack,
   IMicrophoneAudioTrack,
 } from "agora-rtc-sdk-ng";
+import AgoraRTM, { RTMClient } from "agora-rtm";
 import {
-  AnalysisResponse,
+  AgoraAgentSession,
   AgoraSession,
   AppMode,
-  analyzeLiveAudio,
   fetchAgoraSession,
+  startAgoraAgent,
+  stopAgoraAgent,
 } from "./lib/api";
+import { ConversationalAIAPI } from "./lib/conversational-ai-api";
+import {
+  EAgentState,
+  EConversationalAIAPIEvents,
+  EMessageType,
+  ETranscriptHelperMode,
+  ETurnStatus,
+  IAgentTranscription,
+  ITranscriptHelperItem,
+  IUserTranscription,
+} from "./lib/conversational-ai-api/type";
 import { SUPPORTED_EMOTIONS, SupportedEmotion } from "./lib/emotions";
 
-type TranscriptEntry = {
-  id: string;
-  createdAt: string;
-  transcript: string;
-  emotion: SupportedEmotion;
-};
+const { RTM } = AgoraRTM;
 
-const LIVE_CHUNK_DURATION_MS = 6000;
-const LIVE_CHUNK_GAP_MS = 350;
-const MIN_ANALYSIS_BLOB_SIZE_BYTES = 2048;
+type TranscriptRow = {
+  id: string;
+  speaker: "agent" | "user";
+  text: string;
+  status: "listening" | "complete" | "interrupted";
+  createdAt: string;
+};
 
 const envAppId = import.meta.env.VITE_AGORA_APP_ID ?? "";
 const envChannel = import.meta.env.VITE_AGORA_CHANNEL ?? "emotalk";
 const envToken = import.meta.env.VITE_AGORA_TOKEN ?? null;
 const envUidRaw = import.meta.env.VITE_AGORA_UID;
 const backendBaseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3000";
+
+try {
+  const rtcWithParameter = AgoraRTC as typeof AgoraRTC & {
+    setParameter?: (key: string, value: unknown) => void;
+  };
+  rtcWithParameter.setParameter?.("ENABLE_AUDIO_PTS_METADATA", true);
+} catch {
+  // Older SDK builds may ignore this parameter.
+}
 
 function parseEnvUid(rawUid: string | undefined) {
   if (!rawUid) {
@@ -63,17 +84,55 @@ function getTimeLabel() {
   });
 }
 
-function getSupportedLiveAudioMimeType() {
-  const mimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-  return mimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? "";
+function mapAgentStateToLabel(state: EAgentState | null) {
+  switch (state) {
+    case EAgentState.LISTENING:
+      return "Listening for the end of your sentence.";
+    case EAgentState.THINKING:
+      return "Thinking about the reply.";
+    case EAgentState.SPEAKING:
+      return "Speaking back into the meeting.";
+    case EAgentState.SILENT:
+      return "Waiting quietly for the next turn.";
+    case EAgentState.IDLE:
+      return "Ready for the next turn.";
+    default:
+      return "Join the channel to start the interactive meeting.";
+  }
 }
 
-function getLiveAudioExtension(mimeType: string) {
-  if (mimeType.includes("mp4")) {
-    return "mp4";
+function mapTranscriptStatus(status: ETurnStatus) {
+  switch (status) {
+    case ETurnStatus.END:
+      return "complete";
+    case ETurnStatus.INTERRUPTED:
+      return "interrupted";
+    default:
+      return "listening";
   }
+}
 
-  return "webm";
+function mapTranscriptRows(
+  items: ITranscriptHelperItem<Partial<IUserTranscription | IAgentTranscription>>[]
+): TranscriptRow[] {
+  return items
+    .filter((item) => item.text.trim())
+    .slice(-12)
+    .reverse()
+    .map((item) => ({
+      id: `${item.uid}-${item.turn_id}-${item.stream_id}`,
+      speaker:
+        item.metadata?.object === EMessageType.AGENT_TRANSCRIPTION
+          ? ("agent" as const)
+          : ("user" as const),
+      text: item.text,
+      status: mapTranscriptStatus(item.status) as TranscriptRow["status"],
+      createdAt: new Date(item._time).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }),
+    }));
 }
 
 function App() {
@@ -100,33 +159,30 @@ function App() {
   const remoteContainerRef = useRef<HTMLDivElement>(null);
   const cameraTrackRef = useRef<ICameraVideoTrack | null>(null);
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const liveRecorderRef = useRef<MediaRecorder | null>(null);
-  const liveAudioStreamRef = useRef<MediaStream | null>(null);
-  const liveChunkTimeoutRef = useRef<number | null>(null);
-  const liveChunkPartsRef = useRef<Blob[]>([]);
-  const liveLoopEnabledRef = useRef(false);
-  const liveRequestSequenceRef = useRef(0);
+  const rtmClientRef = useRef<RTMClient | null>(null);
+  const conversationalApiRef = useRef<ConversationalAIAPI | null>(null);
+  const agentSessionRef = useRef<AgoraAgentSession | null>(null);
+  const selectedEmotionRef = useRef<SupportedEmotion>("joy");
+  const lastAppliedEmotionRef = useRef<SupportedEmotion | null>(null);
   const hasAutoJoinedRef = useRef(false);
-  const selectedEmotionsRef = useRef<SupportedEmotion[]>([]);
-  const previousEmotionKeyRef = useRef("");
   const joinedRef = useRef(false);
+  const startingAgentRef = useRef(false);
   const [joined, setJoined] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
   const [session, setSession] = useState<AgoraSession | null>(null);
+  const [agentSession, setAgentSession] = useState<AgoraAgentSession | null>(null);
+  const [agentState, setAgentState] = useState<EAgentState | null>(null);
   const [channelInput, setChannelInput] = useState(getChannelFromLocation());
   const [logs, setLogs] = useState<string[]>([]);
-  const [selectedEmotions, setSelectedEmotions] = useState<SupportedEmotion[]>(["joy"]);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isListeningLive, setIsListeningLive] = useState(false);
-  const [liveStatus, setLiveStatus] = useState("Join the channel to start live listening.");
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
-  const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
-  const [conversationSessionId, setConversationSessionId] = useState<string | null>(null);
+  const [selectedEmotion, setSelectedEmotion] = useState<SupportedEmotion>("joy");
+  const [liveStatus, setLiveStatus] = useState("Join the channel to start the interactive meeting.");
+  const [transcriptRows, setTranscriptRows] = useState<TranscriptRow[]>([]);
+  const [latestAgentText, setLatestAgentText] = useState("");
 
   const appendLog = (message: string) => {
-    setLogs((currentLogs) => [`${getTimeLabel()}  ${message}`, ...currentLogs].slice(0, 18));
+    setLogs((currentLogs) => [`${getTimeLabel()}  ${message}`, ...currentLogs].slice(0, 24));
   };
 
   useEffect(() => {
@@ -134,8 +190,12 @@ function App() {
   }, [joined]);
 
   useEffect(() => {
-    selectedEmotionsRef.current = selectedEmotions;
-  }, [selectedEmotions]);
+    selectedEmotionRef.current = selectedEmotion;
+  }, [selectedEmotion]);
+
+  useEffect(() => {
+    agentSessionRef.current = agentSession;
+  }, [agentSession]);
 
   useEffect(() => {
     if (!client) {
@@ -237,40 +297,7 @@ function App() {
     }
   };
 
-  const clearLiveAudioStream = () => {
-    liveAudioStreamRef.current?.getTracks().forEach((track) => track.stop());
-    liveAudioStreamRef.current = null;
-  };
-
-  const clearLiveChunkTimeout = () => {
-    if (liveChunkTimeoutRef.current !== null) {
-      window.clearTimeout(liveChunkTimeoutRef.current);
-      liveChunkTimeoutRef.current = null;
-    }
-  };
-
-  const stopLiveListeningLoop = (statusMessage?: string) => {
-    liveLoopEnabledRef.current = false;
-    clearLiveChunkTimeout();
-
-    const recorder = liveRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-    } else {
-      clearLiveAudioStream();
-      liveRecorderRef.current = null;
-    }
-
-    liveChunkPartsRef.current = [];
-    setIsListeningLive(false);
-
-    if (statusMessage) {
-      setLiveStatus(statusMessage);
-    }
-  };
-
   const cleanupLocalTracks = () => {
-    stopLiveListeningLoop("Live listening stopped.");
     cameraTrackRef.current?.stop();
     cameraTrackRef.current?.close();
     micTrackRef.current?.stop();
@@ -279,143 +306,157 @@ function App() {
     micTrackRef.current = null;
   };
 
-  const sendLiveAudioChunk = async (
-    audioBlob: Blob,
-    mimeType: string,
-    emotion: SupportedEmotion
-  ) => {
-    const chunkId = `${Date.now()}`;
-    const requestId = ++liveRequestSequenceRef.current;
-    const file = new File([audioBlob], `emotalk-live-${chunkId}.${getLiveAudioExtension(mimeType)}`, {
-      type: mimeType,
-    });
+  const detachConversationalApi = async () => {
+    const api = conversationalApiRef.current;
+    conversationalApiRef.current = null;
 
-    try {
-      setIsAnalyzing(true);
-      setAnalysisError(null);
-      setLiveStatus(`Analyzing live speech for ${emotion}.`);
-
-      const result = await analyzeLiveAudio(
-        backendBaseUrl,
-        file,
-        emotion,
-        conversationSessionId ?? undefined
-      );
-
-      if (requestId !== liveRequestSequenceRef.current) {
-        return;
-      }
-
-      setConversationSessionId(result.sessionId ?? null);
-      setAnalysisResult(result);
-      setTranscriptEntries((currentEntries) => [
-        {
-          id: chunkId,
-          createdAt: getTimeLabel(),
-          transcript: result.transcript,
-          emotion,
-        },
-        ...currentEntries,
-      ].slice(0, 6));
-      appendLog(`Live response updated for ${emotion}.`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Live audio analysis failed.";
-      setAnalysisError(message);
-      appendLog(`Live analysis failed: ${message}`);
-    } finally {
-      setIsAnalyzing(false);
-
-      if (!liveLoopEnabledRef.current || !joinedRef.current || selectedEmotionsRef.current.length === 0) {
-        setIsListeningLive(false);
-        return;
-      }
-
-      window.setTimeout(() => {
-        void startLiveListeningChunk();
-      }, LIVE_CHUNK_GAP_MS);
+    if (api) {
+      api.removeAllEventListeners();
+      api.unsubscribe();
     }
   };
 
-  async function startLiveListeningChunk() {
-    if (!liveLoopEnabledRef.current || !joinedRef.current || !micTrackRef.current) {
+  const disconnectRtm = async () => {
+    const rtmClient = rtmClientRef.current;
+    rtmClientRef.current = null;
+
+    if (rtmClient) {
+      try {
+        if (session?.channel) {
+          await rtmClient.unsubscribe(session.channel);
+        }
+      } catch {
+        // Best-effort cleanup.
+      }
+
+      try {
+        await rtmClient.logout();
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  };
+
+  const stopAgentSession = async (appendStopLog = true) => {
+    const currentAgentSession = agentSessionRef.current;
+
+    if (!currentAgentSession) {
       return;
     }
 
-    const mimeType = getSupportedLiveAudioMimeType();
+    agentSessionRef.current = null;
+    setAgentSession(null);
+    setAgentState(null);
 
-    if (!mimeType) {
-      setAnalysisError("This browser does not support live audio chunk recording for analysis.");
-      stopLiveListeningLoop("Live listening is unavailable in this browser.");
+    try {
+      await stopAgoraAgent(backendBaseUrl, currentAgentSession.agent_id);
+      if (appendStopLog) {
+        appendLog(`Stopped agent ${currentAgentSession.agent_id}.`);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to stop the Agora agent cleanly.";
+      appendLog(`Agent stop warning: ${message}`);
+    }
+  };
+
+  const attachConversationalApi = (
+    nextClient: IAgoraRTCClient,
+    nextRtmClient: RTMClient,
+    channelName: string
+  ) => {
+    const api = ConversationalAIAPI.init({
+      rtcEngine: nextClient,
+      rtmEngine: nextRtmClient,
+      renderMode: ETranscriptHelperMode.TEXT,
+      enableLog: false,
+      enableRenderModeFallback: true,
+    });
+
+    api.subscribeMessage(channelName);
+    api.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (items) => {
+      const rows = mapTranscriptRows(items);
+      setTranscriptRows(rows);
+      const latestAgentRow = rows.find((row) => row.speaker === "agent");
+      setLatestAgentText(latestAgentRow?.text ?? "");
+    });
+    api.on(EConversationalAIAPIEvents.AGENT_STATE_CHANGED, (agentUserId, event) => {
+      if (agentSessionRef.current && agentUserId !== agentSessionRef.current.agentUid) {
+        return;
+      }
+
+      setAgentState(event.state);
+      setLiveStatus(mapAgentStateToLabel(event.state));
+    });
+    api.on(EConversationalAIAPIEvents.AGENT_ERROR, (agentUserId, error) => {
+      if (agentSessionRef.current && agentUserId !== agentSessionRef.current.agentUid) {
+        return;
+      }
+
+      setAgentError(error.message);
+      appendLog(`Agent error: ${error.message}`);
+    });
+    api.on(EConversationalAIAPIEvents.MESSAGE_ERROR, (_agentUserId, error) => {
+      setAgentError(error.message);
+      appendLog(`Agent message error: ${error.message}`);
+    });
+
+    conversationalApiRef.current = api;
+  };
+
+  const initializeRtm = async (nextSession: AgoraSession, userUid: string) => {
+    const nextRtmClient = new RTM(nextSession.appId, userUid, {
+      useStringUserId: true,
+    });
+
+    await nextRtmClient.login(nextSession.token ? { token: nextSession.token } : undefined);
+    await nextRtmClient.subscribe(nextSession.channel);
+    rtmClientRef.current = nextRtmClient;
+    attachConversationalApi(client as IAgoraRTCClient, nextRtmClient, nextSession.channel);
+    appendLog(`RTM subscribed to ${nextSession.channel}.`);
+  };
+
+  const startAgentSession = async (
+    emotion: SupportedEmotion,
+    options?: { sessionOverride?: AgoraSession; joinedOverride?: boolean }
+  ) => {
+    const activeSession = options?.sessionOverride ?? session;
+    const isJoined = options?.joinedOverride ?? joinedRef.current;
+
+    if (isDebugMode || !activeSession || !isJoined || startingAgentRef.current) {
       return;
     }
 
-    const emotions = [...selectedEmotionsRef.current];
-    if (emotions.length === 0) {
-      stopLiveListeningLoop("Pick at least one emotion to start live listening.");
-      return;
+    startingAgentRef.current = true;
+    setAgentError(null);
+    setLiveStatus(`Starting the Agora voice agent for ${emotion}.`);
+
+    try {
+      if (agentSessionRef.current) {
+        await stopAgentSession(false);
+      }
+
+      const nextAgentSession = await startAgoraAgent(backendBaseUrl, {
+        channel: activeSession.channel,
+        uid: String(activeSession.uid),
+        emotion,
+      });
+
+      agentSessionRef.current = nextAgentSession;
+      lastAppliedEmotionRef.current = emotion;
+      setAgentSession(nextAgentSession);
+      setAgentState(null);
+      setLiveStatus("Agent joined the meeting. Start talking naturally.");
+      appendLog(`Agent ${nextAgentSession.agentUid} started with ${emotion}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to start the Agora agent.";
+      setAgentError(message);
+      setLiveStatus("Agent failed to start.");
+      appendLog(`Agent start failed: ${message}`);
+    } finally {
+      startingAgentRef.current = false;
     }
-
-    clearLiveAudioStream();
-    liveChunkPartsRef.current = [];
-
-    const audioStream = new MediaStream([micTrackRef.current.getMediaStreamTrack().clone()]);
-    const recorder = new MediaRecorder(audioStream, { mimeType });
-
-    liveAudioStreamRef.current = audioStream;
-    liveRecorderRef.current = recorder;
-    setIsListeningLive(true);
-    setLiveStatus(`Listening live for ${emotions.join(", ")}.`);
-
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        liveChunkPartsRef.current.push(event.data);
-      }
-    };
-
-    recorder.onerror = () => {
-      setAnalysisError("MediaRecorder failed during live listening.");
-      stopLiveListeningLoop("Live listening stopped after a recorder error.");
-    };
-
-    recorder.onstop = () => {
-      clearLiveChunkTimeout();
-
-      const parts = liveChunkPartsRef.current;
-      liveChunkPartsRef.current = [];
-      liveRecorderRef.current = null;
-      clearLiveAudioStream();
-
-      if (!liveLoopEnabledRef.current || !joinedRef.current) {
-        setIsListeningLive(false);
-        return;
-      }
-
-      const nextEmotion = selectedEmotionsRef.current[0];
-      const audioBlob = new Blob(parts, { type: mimeType });
-
-      if (audioBlob.size < MIN_ANALYSIS_BLOB_SIZE_BYTES) {
-        setLiveStatus("Listening for speech...");
-        window.setTimeout(() => {
-          void startLiveListeningChunk();
-        }, LIVE_CHUNK_GAP_MS);
-        return;
-      }
-
-      if (!nextEmotion) {
-        stopLiveListeningLoop("Pick at least one emotion to start live listening.");
-        return;
-      }
-
-      void sendLiveAudioChunk(audioBlob, mimeType, nextEmotion);
-    };
-
-    recorder.start();
-    liveChunkTimeoutRef.current = window.setTimeout(() => {
-      if (recorder.state !== "inactive") {
-        recorder.stop();
-      }
-    }, LIVE_CHUNK_DURATION_MS);
-  }
+  };
 
   const leaveChannel = async () => {
     try {
@@ -423,14 +464,20 @@ function App() {
         throw new Error(clientError || "Agora RTC client is unavailable.");
       }
 
+      await stopAgentSession();
+      await detachConversationalApi();
+      await disconnectRtm();
       cleanupLocalTracks();
       clearVideoContainers();
       await client.leave();
       setJoined(false);
       setSession(null);
+      setTranscriptRows([]);
+      setLatestAgentText("");
+      setLiveStatus("Join the channel to start the interactive meeting.");
       appendLog("Left the Agora channel.");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to leave channel.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to leave channel.";
       setConnectionError(message);
     }
   };
@@ -450,12 +497,11 @@ function App() {
       const message =
         fetchError instanceof Error ? fetchError.message : "Request to backend session endpoint failed.";
       appendLog(`Backend session endpoint failed: ${message}`);
-      appendLog("Falling back to frontend Agora env values.");
     }
 
-    if (!envAppId) {
+    if (!envAppId || !envToken) {
       throw new Error(
-        "Missing Agora config. Set AGORA_APP_ID on the backend or VITE_AGORA_APP_ID in the frontend."
+        "Missing backend Agora session. Set AGORA_APP_ID, AGORA_APP_CERTIFICATE, and AGORA_CAI credentials on the backend."
       );
     }
 
@@ -465,6 +511,7 @@ function App() {
       token: envToken,
       uid: parseEnvUid(envUidRaw),
       source: "frontend-env",
+      useStringUid: true,
     } satisfies AgoraSession;
   };
 
@@ -480,7 +527,9 @@ function App() {
 
       setConnecting(true);
       setConnectionError(null);
-      setAnalysisError(null);
+      setAgentError(null);
+      setTranscriptRows([]);
+      setLatestAgentText("");
 
       const nextSession = await resolveSession(mode, channelInput.trim() || envChannel);
       appendLog(`Using Agora session from ${nextSession.source}.`);
@@ -490,10 +539,11 @@ function App() {
         nextSession.token,
         nextSession.uid
       );
+      const normalizedUid = String(joinedUid);
 
       if (isDebugMode) {
         appendLog(`Joined debug viewer for channel ${nextSession.channel} as ${joinedUid}.`);
-        setSession({ ...nextSession, uid: joinedUid });
+        setSession({ ...nextSession, uid: normalizedUid });
         setJoined(true);
         return;
       }
@@ -506,16 +556,31 @@ function App() {
 
       await client.publish([microphoneTrack, nextCameraTrack]);
       renderLocalVideo(nextCameraTrack);
+      await initializeRtm({ ...nextSession, uid: normalizedUid }, normalizedUid);
 
-      setSession({ ...nextSession, uid: joinedUid });
+      const activeSession = { ...nextSession, uid: normalizedUid };
+      joinedRef.current = true;
+      setSession(activeSession);
       setJoined(true);
-      setTranscriptEntries([]);
-      setAnalysisResult(null);
-      setConversationSessionId(null);
-      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${joinedUid}.`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to join channel.";
+      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${normalizedUid}.`);
+      await startAgentSession(selectedEmotionRef.current, {
+        sessionOverride: activeSession,
+        joinedOverride: true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to join channel.";
       setConnectionError(message);
+      appendLog(`Join failed: ${message}`);
+      await detachConversationalApi();
+      await disconnectRtm();
+      cleanupLocalTracks();
+      if (client) {
+        try {
+          await client.leave();
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
     } finally {
       setConnecting(false);
     }
@@ -533,55 +598,20 @@ function App() {
   }, [autoJoin, isDebugMode]);
 
   useEffect(() => {
-    if (isDebugMode) {
+    if (
+      isDebugMode ||
+      !joined ||
+      !session ||
+      !agentSessionRef.current ||
+      startingAgentRef.current ||
+      lastAppliedEmotionRef.current === selectedEmotion
+    ) {
       return;
     }
 
-    if (!joined || !micTrackRef.current) {
-      setIsListeningLive(false);
-      setLiveStatus("Join the channel to start live listening.");
-      return;
-    }
-
-    if (selectedEmotions.length === 0) {
-      stopLiveListeningLoop("Pick at least one emotion to start live listening.");
-      return;
-    }
-
-    if (liveLoopEnabledRef.current) {
-      return;
-    }
-
-    liveLoopEnabledRef.current = true;
-    setAnalysisError(null);
-    setLiveStatus(`Listening live for ${selectedEmotions.join(", ")}.`);
-    appendLog(`Live listening started for ${selectedEmotions.join(", ")}.`);
-    void startLiveListeningChunk();
-  }, [isDebugMode, joined, selectedEmotions.length]);
-
-  useEffect(() => {
-    const emotionKey = selectedEmotions.join(",");
-
-    if (emotionKey === previousEmotionKeyRef.current) {
-      return;
-    }
-
-    previousEmotionKeyRef.current = emotionKey;
-
-    if (isDebugMode) {
-      return;
-    }
-
-    if (selectedEmotions.length === 0) {
-      setLiveStatus(joined ? "Pick at least one emotion to start live listening." : "Join the channel to start live listening.");
-      return;
-    }
-
-    if (joined) {
-      appendLog(`Live emotions updated: ${selectedEmotions.join(", ")}.`);
-      setLiveStatus(`Listening live for ${selectedEmotions.join(", ")}.`);
-    }
-  }, [isDebugMode, joined, selectedEmotions]);
+    appendLog(`Restarting agent tone as ${selectedEmotion}.`);
+    void startAgentSession(selectedEmotion);
+  }, [isDebugMode, joined, selectedEmotion, session]);
 
   const openDebugViewer = () => {
     const debugUrl = new URL(window.location.href);
@@ -591,20 +621,22 @@ function App() {
     window.open(debugUrl.toString(), "_blank", "noopener,noreferrer");
   };
 
-  const toggleEmotion = (emotion: SupportedEmotion) => {
-    setAnalysisError(null);
-    setSelectedEmotions((currentEmotions) => {
-      if (currentEmotions.includes(emotion)) {
-        return currentEmotions.filter((currentEmotion) => currentEmotion !== emotion);
-      }
+  const interruptAgent = async () => {
+    const api = conversationalApiRef.current;
+    const currentAgentSession = agentSessionRef.current;
 
-      if (currentEmotions.length >= 3) {
-        setAnalysisError("Choose up to 3 emotions at a time.");
-        return currentEmotions;
-      }
+    if (!api || !currentAgentSession) {
+      return;
+    }
 
-      return [...currentEmotions, emotion];
-    });
+    try {
+      await api.interrupt(currentAgentSession.agentUid);
+      appendLog(`Interrupted agent ${currentAgentSession.agentUid}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to interrupt the agent.";
+      setAgentError(message);
+      appendLog(`Interrupt failed: ${message}`);
+    }
   };
 
   return (
@@ -612,11 +644,11 @@ function App() {
       <section className="hero card">
         <div>
           <p className="eyebrow">Agora Live Emotion Call</p>
-          <h1>{isDebugMode ? "Debug Viewer" : "Live Conversation Console"}</h1>
+          <h1>{isDebugMode ? "Debug Viewer" : "Interactive Voice Meeting"}</h1>
           <p className="summary">
             {isDebugMode
               ? "Subscribe in a separate tab to verify the audio and video feed that the broadcaster is actually sending."
-              : "Join once, keep talking naturally, and let the app continuously transcribe short live mic segments and generate emotion-shaped responses while the call stays active."}
+              : "Join once, let Agora detect the end of each spoken turn, and have the voice agent answer back inside the meeting without recorder chunks or manual uploads."}
           </p>
         </div>
 
@@ -638,7 +670,12 @@ function App() {
               Leave
             </button>
             {!isDebugMode ? (
-              <button onClick={openDebugViewer} className="secondary">
+              <button onClick={interruptAgent} className="secondary" disabled={!agentSession}>
+                Interrupt Agent
+              </button>
+            ) : null}
+            {!isDebugMode ? (
+              <button onClick={openDebugViewer} className="ghost-button">
                 Open Debug Tab
               </button>
             ) : null}
@@ -674,36 +711,42 @@ function App() {
             <div>
               <h2>Emotion Steering</h2>
               <p>
-                Pick an emotion before joining or while you are already in the call. The live loop
-                uses the first selected emotion for the next chunk.
+                Pick one tone before joining or switch it mid-call. The app restarts the live
+                agent with the new emotion while the RTC meeting stays connected.
               </p>
             </div>
-            <div className={`status-pill ${isListeningLive ? "status-pill-live" : ""}`}>
-              {isAnalyzing ? "Responding..." : liveStatus}
-            </div>
+            <div className={`status-pill ${agentState ? "status-pill-live" : ""}`}>{liveStatus}</div>
           </div>
 
           <div className="emotion-grid">
-            {SUPPORTED_EMOTIONS.map((emotion) => {
-              const isSelected = selectedEmotions.includes(emotion);
-
-              return (
-                <button
-                  key={emotion}
-                  type="button"
-                  className={`emotion-chip ${isSelected ? "emotion-chip-selected" : ""}`}
-                  onClick={() => toggleEmotion(emotion)}
-                >
-                  {emotion}
-                </button>
-              );
-            })}
+            {SUPPORTED_EMOTIONS.map((emotion) => (
+              <button
+                key={emotion}
+                type="button"
+                className={`emotion-chip ${selectedEmotion === emotion ? "emotion-chip-selected" : ""}`}
+                onClick={() => setSelectedEmotion(emotion)}
+              >
+                {emotion}
+              </button>
+            ))}
           </div>
 
-          <p className="muted">
-            Active emotion: {selectedEmotions[0] ?? "none"}
-          </p>
-          {analysisError ? <p className="error">{analysisError}</p> : null}
+          <div className="agent-summary-grid">
+            <article className="analysis-card">
+              <p className="eyebrow">Active Emotion</p>
+              <p className="analysis-response">{selectedEmotion}</p>
+            </article>
+            <article className="analysis-card">
+              <p className="eyebrow">Agent State</p>
+              <p className="analysis-response">{agentState ?? "not started"}</p>
+            </article>
+            <article className="analysis-card">
+              <p className="eyebrow">Agent UID</p>
+              <p className="analysis-response">{agentSession?.agentUid ?? "-"}</p>
+            </article>
+          </div>
+
+          {agentError ? <p className="error">{agentError}</p> : null}
         </section>
       ) : null}
 
@@ -711,48 +754,45 @@ function App() {
         <section className="card">
           <div className="section-heading">
             <div>
-              <h2>Live Response Stream</h2>
+              <h2>Live Transcript</h2>
               <p>
-                The backend transcribes short live mic slices and returns emotion-shaped replies
-                continuously while you stay on the Agora call.
+                Transcript and response state now come from Agora RTM events instead of uploaded
+                MediaRecorder chunks.
               </p>
             </div>
           </div>
 
-          {analysisResult ? (
+          {latestAgentText ? (
             <div className="analysis-layout">
               <article className="analysis-card analysis-card-wide">
-                <p className="eyebrow">Latest Transcript</p>
-                <p className="transcript">{analysisResult.transcript}</p>
-              </article>
-
-              <article className="analysis-card">
-                <p className="eyebrow">{analysisResult.emotion}</p>
-                <p className="analysis-response">{analysisResult.reply}</p>
+                <p className="eyebrow">Latest Agent Reply</p>
+                <p className="transcript">{latestAgentText}</p>
               </article>
             </div>
           ) : (
-            <p className="muted">No live transcript yet. Join and start speaking.</p>
+            <p className="muted">No spoken reply yet. Join and speak naturally.</p>
           )}
 
           <div className="section-heading section-heading-tight">
             <div>
-              <h2>Recent Transcript Chunks</h2>
-              <p>Latest spoken segments picked up by the live loop.</p>
+              <h2>Conversation Timeline</h2>
+              <p>Sentence-level turns as they arrive from the Agora conversational agent.</p>
             </div>
           </div>
 
           <div className="timeline-list">
-            {transcriptEntries.length === 0 ? (
-              <p className="muted">No live chunks processed yet.</p>
+            {transcriptRows.length === 0 ? (
+              <p className="muted">No transcript events yet.</p>
             ) : (
-              transcriptEntries.map((entry) => (
-                <article key={entry.id} className="timeline-card">
+              transcriptRows.map((entry) => (
+                <article key={entry.id} className={`timeline-card timeline-card-${entry.speaker}`}>
                   <div className="timeline-meta">
-                    <strong>{entry.createdAt}</strong>
-                    <span>{entry.emotion}</span>
+                    <strong>{entry.speaker === "agent" ? "Agent" : "You"}</strong>
+                    <span>
+                      {entry.createdAt} · {entry.status}
+                    </span>
                   </div>
-                  <p className="timeline-text">{entry.transcript}</p>
+                  <p className="timeline-text">{entry.text}</p>
                 </article>
               ))
             )}
@@ -768,7 +808,7 @@ function App() {
               <p>
                 {isDebugMode
                   ? "Debug viewer does not capture local media."
-                  : "Your live camera preview while the Agora call and live analysis loop are running."}
+                  : "Your live camera preview while the Agora meeting and conversational agent stay active."}
               </p>
             </div>
           </div>
@@ -780,8 +820,8 @@ function App() {
             <div>
               <h2>Remote Feed</h2>
               <p>
-                This is the easiest live sanity check for what another client receives from the
-                Agora channel.
+                This shows what the other client, including the agent audio/video tracks, sends
+                into the Agora channel.
               </p>
             </div>
           </div>
@@ -794,8 +834,8 @@ function App() {
           <div>
             <h2>Debug Log</h2>
             <p>
-              Lightweight event log for channel joins, publishes, subscriptions, and live analysis
-              activity.
+              Lightweight event log for RTC join/publish flow, RTM subscription, and agent
+              lifecycle events.
             </p>
           </div>
         </div>
