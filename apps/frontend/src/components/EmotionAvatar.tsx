@@ -224,7 +224,7 @@ function getEyeState(emotion: SupportedEmotion, blink: number, speaking: boolean
     case "sadness":
       return { width: 28, height: clamp(13 * open + emphasis, 1.8, 14), tilt: 0.24, browLift: 6 - emphasis * 2 };
     case "anger":
-      return { width: 30, height: clamp(9 * open + emphasis * 1.2, 1.4, 10), tilt: speaking ? -0.32 : -0.42, browLift: -18 - emphasis * 8 };
+      return { width: 26, height: clamp(6 * open + emphasis * 0.8, 1.2, 7), tilt: speaking ? -0.26 : -0.34, browLift: -10 - emphasis * 4 };
     case "anxiety":
       return { width: 24, height: clamp(16 * open + emphasis * 2.2, 2.8, 18), tilt: 0.26, browLift: 12 + emphasis * 5 };
     default:
@@ -302,7 +302,7 @@ function getMouthShape(
     case "sadness":
       return { width: 42 + widthBias * 0.7, height: 10 + openAmount * 24, curve: -0.54, innerLift: 0.5 };
     case "anger":
-      return { width: 50 + widthBias * 0.35, height: 11 + openAmount * 18, curve: -0.16, innerLift: 0.38 };
+      return { width: 44 + widthBias * 0.2, height: 7 + openAmount * 10, curve: -0.58, innerLift: 0.18 };
     case "anxiety":
       return { width: 34 + widthBias * 0.34, height: 14 + openAmount * 34, curve: -0.28, innerLift: 0.66 };
     default:
@@ -398,6 +398,26 @@ function drawEmotionAccent(
       context.lineTo(10, -96);
       context.lineTo(2, -124);
       context.lineTo(22, -124);
+      context.stroke();
+
+      context.fillStyle = "rgba(255, 208, 94, 0.95)";
+      context.strokeStyle = "#7f1212";
+      context.lineWidth = 3;
+      context.beginPath();
+      context.moveTo(46, -184);
+      context.lineTo(52, -198);
+      context.lineTo(62, -190);
+      context.lineTo(70, -204);
+      context.lineTo(74, -184);
+      context.lineTo(86, -180);
+      context.lineTo(74, -172);
+      context.lineTo(78, -156);
+      context.lineTo(64, -162);
+      context.lineTo(56, -148);
+      context.lineTo(52, -166);
+      context.lineTo(40, -170);
+      context.closePath();
+      context.fill();
       context.stroke();
       break;
     case "anxiety":
@@ -574,6 +594,108 @@ function drawAvatarHead(
   context.closePath();
   context.fill();
   context.stroke();
+}
+
+function drawAvatarHeadwear(
+  context: CanvasRenderingContext2D,
+  emotion: SupportedEmotion,
+  palette: AvatarPalette,
+  time: number,
+  energy: number
+) {
+  context.save();
+  context.lineJoin = "round";
+
+  switch (emotion) {
+    case "joy":
+      context.fillStyle = "#6f43d6";
+      context.strokeStyle = "#f9d8ff";
+      context.lineWidth = 4;
+      context.beginPath();
+      context.moveTo(-98, 34);
+      context.quadraticCurveTo(-112, -34, -80, -106);
+      context.quadraticCurveTo(-36, -160 - energy * 6, 0, -154);
+      context.quadraticCurveTo(34, -160 - energy * 6, 82, -108);
+      context.quadraticCurveTo(110, -38, 98, 38);
+      context.quadraticCurveTo(76, 8, 56, -10);
+      context.quadraticCurveTo(16, -34, 0, -18);
+      context.quadraticCurveTo(-22, -38, -62, -8);
+      context.quadraticCurveTo(-78, 8, -98, 34);
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+    case "sadness":
+      context.fillStyle = "#5267b8";
+      context.strokeStyle = "#dce7ff";
+      context.lineWidth = 4;
+      context.beginPath();
+      context.moveTo(-96, 28);
+      context.quadraticCurveTo(-118, -30, -92, -104);
+      context.quadraticCurveTo(-44, -158, 0, -166);
+      context.quadraticCurveTo(40, -160, 90, -106);
+      context.quadraticCurveTo(118, -34, 94, 30);
+      context.quadraticCurveTo(80, 4, 70, -34);
+      context.quadraticCurveTo(32, -68, 0, -66);
+      context.quadraticCurveTo(-30, -68, -70, -34);
+      context.quadraticCurveTo(-82, 2, -96, 28);
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+    case "anger":
+      context.fillStyle = "#671414";
+      context.strokeStyle = "#ffcf78";
+      context.lineWidth = 4;
+      context.beginPath();
+      context.moveTo(-92, 38);
+      context.lineTo(-78, -82);
+      context.lineTo(-42, -126);
+      context.lineTo(-16, -112);
+      context.lineTo(0, -168 - energy * 8);
+      context.lineTo(18, -112);
+      context.lineTo(46, -130);
+      context.lineTo(80, -84);
+      context.lineTo(92, 40);
+      context.quadraticCurveTo(72, 8, 54, -6);
+      context.quadraticCurveTo(22, -34, 0, -20);
+      context.quadraticCurveTo(-22, -34, -54, -6);
+      context.quadraticCurveTo(-72, 8, -92, 38);
+      context.closePath();
+      context.fill();
+      context.stroke();
+      break;
+    case "anxiety":
+      context.fillStyle = "#5c7167";
+      context.strokeStyle = "#eef5c2";
+      context.lineWidth = 4;
+      context.beginPath();
+      context.moveTo(-88, 40);
+      context.quadraticCurveTo(-106, -24, -82, -100);
+      context.quadraticCurveTo(-46, -154, 0, -172);
+      context.quadraticCurveTo(44, -154, 82, -102);
+      context.quadraticCurveTo(104, -26, 88, 42);
+      context.quadraticCurveTo(68, 20, 58, -8 + Math.sin(time / 50) * 2);
+      context.quadraticCurveTo(24, -46, 0, -38);
+      context.quadraticCurveTo(-26, -48, -60, -10 + Math.cos(time / 56) * 2);
+      context.quadraticCurveTo(-72, 16, -88, 40);
+      context.closePath();
+      context.fill();
+      context.stroke();
+
+      context.strokeStyle = "rgba(238, 245, 194, 0.55)";
+      context.lineWidth = 2.5;
+      context.beginPath();
+      context.moveTo(-36, -126);
+      context.quadraticCurveTo(-18, -142 + Math.sin(time / 48) * 4, -4, -120);
+      context.quadraticCurveTo(10, -136 + Math.cos(time / 42) * 4, 34, -122);
+      context.stroke();
+      break;
+    default:
+      break;
+  }
+
+  context.restore();
 }
 
 function drawAvatarAccessory(
@@ -905,6 +1027,7 @@ export function EmotionAvatar({
       context.fill();
 
       drawEmotionAccent(context, currentEmotion, activePalette, time, energy);
+      drawAvatarHeadwear(context, currentEmotion, activePalette, time, energy);
       drawAvatarAccessory(context, currentEmotion, activePalette, time, energy);
       drawAvatarHead(context, currentEmotion, activePalette, energy);
 
@@ -928,7 +1051,7 @@ export function EmotionAvatar({
 
       const drawEye = (side: -1 | 1) => {
         const x = side * 42;
-        const y = currentEmotion === "anxiety" ? -4 : -8;
+        const y = currentEmotion === "anxiety" ? -4 : currentEmotion === "anger" ? -2 : -8;
         const eyeShake = currentEmotion === "anxiety" ? Math.sin(time / 42 + side) * (1.1 + cadence.emphasis) : 0;
 
         context.save();
@@ -948,10 +1071,18 @@ export function EmotionAvatar({
 
         context.restore();
 
-        context.beginPath();
-        context.moveTo(x - 20, y - 26 - eye.browLift);
-        context.quadraticCurveTo(x, y - 34 - eye.browLift - cadence.emphasis * 4, x + 20, y - 22 - eye.browLift);
-        context.stroke();
+        if (currentEmotion === "anger") {
+          context.beginPath();
+          context.moveTo(x - 18, y - 18);
+          context.quadraticCurveTo(x - 4, y - 28 - cadence.emphasis * 2, x + 8, y - 16);
+          context.quadraticCurveTo(x + 16, y - 10 - cadence.emphasis, x + 20, y - 12);
+          context.stroke();
+        } else {
+          context.beginPath();
+          context.moveTo(x - 20, y - 26 - eye.browLift);
+          context.quadraticCurveTo(x, y - 34 - eye.browLift - cadence.emphasis * 4, x + 20, y - 22 - eye.browLift);
+          context.stroke();
+        }
 
         if (currentEmotion === "anxiety") {
           context.strokeStyle = "rgba(82, 108, 97, 0.52)";
@@ -982,14 +1113,14 @@ export function EmotionAvatar({
 
       if (currentEmotion === "anger") {
         context.strokeStyle = "rgba(108, 20, 20, 0.82)";
-        context.lineWidth = 4;
+        context.lineWidth = 3;
         context.beginPath();
-        context.moveTo(-mouth.width * 0.46, 66);
-        context.lineTo(-mouth.width * 0.28, 74);
-        context.lineTo(-mouth.width * 0.1, 68);
-        context.moveTo(mouth.width * 0.1, 68);
-        context.lineTo(mouth.width * 0.28, 74);
-        context.lineTo(mouth.width * 0.46, 66);
+        context.moveTo(-mouth.width * 0.42, 68);
+        context.lineTo(-mouth.width * 0.24, 74);
+        context.lineTo(-mouth.width * 0.1, 70);
+        context.moveTo(mouth.width * 0.1, 70);
+        context.lineTo(mouth.width * 0.24, 74);
+        context.lineTo(mouth.width * 0.42, 68);
         context.stroke();
       }
 
