@@ -32,6 +32,17 @@ function getLiveAudioExtension(mimeType: string) { return mimeType.includes("mp4
 function getAudioMeterSegments(level: number) { const normalizedLevel = Math.max(0, Math.min(level, 100)); return Array.from({ length: 10 }, (_, index) => normalizedLevel >= (index + 1) * 10); }
 function normalizeTrackVolume(level: number) { return Math.max(0, Math.min(Math.round(level * 100), 100)); }
 
+function formatDuration(totalSeconds: number) {
+  const mins = Math.floor(totalSeconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const secs = Math.floor(totalSeconds % 60)
+    .toString()
+    .padStart(2, "0");
+
+  return `${mins}:${secs}`;
+}
+
 function App() {
   const mode = getModeFromLocation();
   const isDebugMode = mode === "debug";
@@ -109,6 +120,7 @@ function App() {
   useEffect(() => { clearVideoContainers(); }, [isDebugMode]);
   useEffect(() => { joinedRef.current = joined; }, [joined]);
   useEffect(() => { selectedEmotionsRef.current = selectedEmotions; }, [selectedEmotions]);
+
 
   useEffect(() => {
     if (!client) return;
@@ -549,3 +561,4 @@ function App() {
 }
 
 export default App;
+
