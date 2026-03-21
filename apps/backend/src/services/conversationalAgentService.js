@@ -10,10 +10,10 @@ const DEFAULT_LANGUAGE = "en";
 const DEFAULT_CUSTOMER_BASE_URL = "https://api.agora.io";
 
 const EMOTION_VOICE_SETTINGS = {
-  joy:     { stability: 0.34, similarity_boost: 0.72, style: 0.82, speed: 1.08, use_speaker_boost: true },
+  joy: { stability: 0.34, similarity_boost: 0.72, style: 0.82, speed: 1.08, use_speaker_boost: true },
   sadness: { stability: 0.62, similarity_boost: 0.70, style: 0.28, speed: 0.92, use_speaker_boost: true },
   anxiety: { stability: 0.40, similarity_boost: 0.70, style: 0.72, speed: 1.02, use_speaker_boost: true },
-  anger:   { stability: 0.22, similarity_boost: 0.76, style: 0.95, speed: 1.05, use_speaker_boost: true },
+  anger: { stability: 0.22, similarity_boost: 0.76, style: 0.95, speed: 1.05, use_speaker_boost: true },
 };
 
 function buildRtcRtmToken({ appId, appCertificate, channel, uid, role, expirationSeconds }) {
@@ -141,8 +141,12 @@ function buildAgentPayload({ channel, remoteUid, emotion, agentUid }) {
         asr: {
           vendor: "openai",
           params: {
-            model: config.openAiTranscriptionModel,
-            language: normalizeOpenAiLanguage(config.language),
+            api_key: config.openAiApiKey,
+            input_audio_transcription: {
+              model: config.openAiTranscriptionModel,
+              prompt: "Please transcribe the following audio into text. Output in English.",
+              language: normalizeOpenAiLanguage(config.language),
+            },
           },
         },
         llm: {

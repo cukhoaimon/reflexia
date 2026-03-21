@@ -564,11 +564,7 @@ button {
   box-shadow: 0 0 12px rgba(196, 132, 252, 0.2);
 }
 
-.toolbar-btn--cc {
-  background: transparent;
-  color: var(--gm-text-secondary);
-  border-color: transparent;
-}
+/* CC button styling */
 
 .toolbar-btn--cc:hover:not(:disabled) {
   background: rgba(196, 132, 252, 0.12);
@@ -606,6 +602,22 @@ button {
   padding: 6px 14px;
   border-radius: 8px;
   margin: 0;
+}
+
+.subtitle-word {
+  display: inline;
+  animation: subtitleWordIn 0.2s ease-out both;
+}
+
+@keyframes subtitleWordIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ═══════════════════════════════════════

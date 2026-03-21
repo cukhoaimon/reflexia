@@ -7,7 +7,7 @@ import { LocalCameraPreview } from "./components/LocalCameraPreview";
 import { AnalysisResponse, AgoraSession, AgoraAgentSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech, startAgoraAgent, stopAgoraAgent, updateAgoraAgent } from "./lib/api";
 import type { AvatarSpeechPerformance, AvatarSpeechResponse } from "./lib/api";
 import AgoraRTM from "agora-rtm";
-import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents } from "./lib/conversational-ai-api";
+import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents, ETurnStatus } from "./lib/conversational-ai-api";
 import type { TStateChangeEvent, TModuleError, ITranscriptHelperItem, IUserTranscription, IAgentTranscription } from "./lib/conversational-ai-api";
 import { EMOTIONS, LIVE_CHUNK_DURATION_MS, LIVE_CHUNK_GAP_MS, MIN_ANALYSIS_BLOB_SIZE_BYTES } from "./lib/constants";
 import { SupportedEmotion, SUPPORTED_EMOTIONS } from "./lib/emotions";
@@ -115,8 +115,8 @@ function IconCC() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="2" y="5" width="20" height="14" rx="2" ry="2" />
-      <path d="M8 12a2 2 0 1 0 0-2" />
-      <path d="M14 12a2 2 0 1 0 0-2" />
+      <path d="M10.5 13.5a2.5 2.5 0 0 1-5 0v-3a2.5 2.5 0 0 1 5 0" />
+      <path d="M18.5 13.5a2.5 2.5 0 0 1-5 0v-3a2.5 2.5 0 0 1 5 0" />
     </svg>
   );
 }
@@ -188,6 +188,7 @@ function App() {
   const [isEmotionSwitching, setIsEmotionSwitching] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+  const [liveSubtitleText, setLiveSubtitleText] = useState<string>("");
   const [currentTime, setCurrentTime] = useState(getTimeLabel());
   const currentEmotion = EMOTIONS.find((emotion) => emotion.key === selectedEmotion) ?? EMOTIONS[0];
   const localMeterSegments = getAudioMeterSegments(localAudioLevel);
@@ -683,13 +684,22 @@ function App() {
         });
         convAI.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (history: ITranscriptHelperItem<Partial<IUserTranscription | IAgentTranscription>>[]) => {
           const last = history[history.length - 1];
-          if (last) {
+          if (!last) return;
+
+          // Always update live subtitle (streaming text while turn is in progress)
+          setLiveSubtitleText(last.text ?? "");
+
+          // Only add to history when the turn is finalized
+          const isFinished = last.status === ETurnStatus.END || last.status === ETurnStatus.INTERRUPTED;
+          if (isFinished && last.text?.trim()) {
             setTranscriptEntries((prev) =>
-              [{ id: String(Date.now()), createdAt: getTimeLabel(), transcript: last.text ?? "", emotion: selectedEmotionRef.current }, ...prev].slice(0, 6)
+              [{ id: `${last.turn_id}-${last.uid}`, createdAt: getTimeLabel(), transcript: last.text ?? "", emotion: selectedEmotionRef.current }, ...prev].slice(0, 6)
             );
-            if (last.metadata?.object === "assistant.transcription" && last.text?.trim()) {
+            if (last.metadata?.object === "assistant.transcription") {
               activateAvatarTextResponse(last.text, last.turn_id, last.turn_id !== avatarResponseTurnIdRef.current, null);
             }
+            // Clear live text after a short delay so final text remains briefly visible
+            setTimeout(() => setLiveSubtitleText(""), 2000);
           }
         });
         convAI.on(EConversationalAIAPIEvents.AGENT_ERROR, (_uid: string, err: TModuleError) => {
@@ -907,6 +917,7 @@ function App() {
               <h1 className="prejoin-title">Ready to join?</h1>
               <p className="prejoin-subtitle">
                 Choose an emotion layer to start your Reflexia session.
+                You can switch emotions at any time during the call.
               </p>
               <div className="prejoin-emotion-section">
                 <span className="prejoin-emotion-label">
@@ -976,9 +987,15 @@ function App() {
           </div>
 
           {/* ── Subtitle Overlay ── */}
-          {subtitlesEnabled && transcriptEntries.length > 0 && (
+          {subtitlesEnabled && liveSubtitleText && (
             <div className="subtitle-overlay">
-              <p className="subtitle-text">{transcriptEntries[0].transcript}</p>
+              <p className="subtitle-text">
+                {liveSubtitleText.split(" ").map((word, i) => (
+                  <span key={i} className="subtitle-word" style={{ animationDelay: `${i * 0.02}s` }}>
+                    {word}{" "}
+                  </span>
+                ))}
+              </p>
             </div>
           )}
 
