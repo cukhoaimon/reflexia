@@ -5,6 +5,7 @@ import { CallSetupPanel } from "./components/CallSetupPanel";
 import { LiveResponsePanel } from "./components/LiveResponsePanel";
 import { LocalCameraPreview } from "./components/LocalCameraPreview";
 import { AnalysisResponse, AgoraSession, AgoraAgentSession, AppMode, analyzeLiveAudio, fetchAgoraSession, requestAvatarSpeech, startAgoraAgent, stopAgoraAgent } from "./lib/api";
+import type { AvatarSpeechPerformance, AvatarSpeechResponse } from "./lib/api";
 import AgoraRTM from "agora-rtm";
 import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents } from "./lib/conversational-ai-api";
 import type { TStateChangeEvent, TModuleError, ITranscriptHelperItem, IUserTranscription, IAgentTranscription } from "./lib/conversational-ai-api";
@@ -27,6 +28,15 @@ function getSupportedLiveAudioMimeType() { const mimeTypes = ["audio/webm;codecs
 function getLiveAudioExtension(mimeType: string) { return mimeType.includes("mp4") ? "mp4" : "webm"; }
 function getAudioMeterSegments(level: number) { const normalizedLevel = Math.max(0, Math.min(level, 100)); return Array.from({ length: 10 }, (_, index) => normalizedLevel >= (index + 1) * 10); }
 function normalizeTrackVolume(level: number) { return Math.max(0, Math.min(Math.round(level * 100), 100)); }
+function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(value, max)); }
+function getAvatarSpeechDuration(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  const punctuationBoost = (trimmed.match(/[,.!?;:]/g) ?? []).length * 120;
+  return clamp(trimmed.length * 72 + punctuationBoost + 900, 1600, 7200);
+}
+
+type AvatarSpeechSource = "idle" | "text" | "voice";
 
 function App() {
   const mode = getModeFromLocation();
@@ -46,6 +56,7 @@ function App() {
   const hasAutoJoinedRef = useRef(false);
   const selectedEmotionRef = useRef<SupportedEmotion>("joy");
   const joinedRef = useRef(false);
+  const micEnabledRef = useRef(false);
   const liveAudioStreamRef = useRef<MediaStream | null>(null);
   const liveRecorderRef = useRef<MediaRecorder | null>(null);
   const liveChunkPartsRef = useRef<Blob[]>([]);
@@ -53,6 +64,14 @@ function App() {
   const liveLoopEnabledRef = useRef(false);
   const liveRequestSequenceRef = useRef(0);
   const previousEmotionKeyRef = useRef("");
+  const avatarSpeechTimeoutRef = useRef<number | null>(null);
+  const avatarAudioElementRef = useRef<HTMLAudioElement | null>(null);
+  const avatarAudioUrlRef = useRef<string | null>(null);
+  const avatarAudioContextRef = useRef<AudioContext | null>(null);
+  const avatarAudioAnalyserRef = useRef<AnalyserNode | null>(null);
+  const avatarAudioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const avatarAudioMeterIntervalRef = useRef<number | null>(null);
+  const avatarResponseTurnIdRef = useRef<number | null>(null);
   const [joined, setJoined] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -77,12 +96,27 @@ function App() {
   const [localAudioLevel, setLocalAudioLevel] = useState(0);
   const [remoteAudioLevel, setRemoteAudioLevel] = useState(0);
   const [audioSignalDetected, setAudioSignalDetected] = useState(false);
+  const [avatarSpeaking, setAvatarSpeaking] = useState(false);
+  const [avatarSpeechLevel, setAvatarSpeechLevel] = useState(0);
+  const [avatarSpeechSource, setAvatarSpeechSource] = useState<AvatarSpeechSource>("idle");
+  const [avatarResponseText, setAvatarResponseText] = useState("");
+  const [avatarSpeechStartedAt, setAvatarSpeechStartedAt] = useState(0);
+  const [avatarSpeechPerformance, setAvatarSpeechPerformance] = useState<AvatarSpeechPerformance | null>(null);
   const currentEmotion = EMOTIONS.find((emotion) => emotion.key === selectedEmotion) ?? EMOTIONS[0];
   const localMeterSegments = getAudioMeterSegments(localAudioLevel);
-  const avatarSignalLevel = Math.max(localAudioLevel, remoteAudioLevel);
+  const avatarStageSpeaking = avatarSpeaking || remoteAudioLevel > 6 || agentState === "speaking";
+  const avatarSignalLevel = Math.max(remoteAudioLevel, avatarSpeechLevel);
   const avatarMeterSegments = getAudioMeterSegments(avatarSignalLevel);
   const micStatus = !joined ? "offline" : !micEnabled ? "muted" : localAudioLevel > 8 ? "speaking" : "live";
-  const avatarStageStatus = !joined ? "idle" : audioSignalDetected ? "live" : isAnalyzing ? "tracking" : "ready";
+  const avatarStageStatus = !joined
+    ? "idle"
+    : avatarStageSpeaking
+      ? (avatarSpeechSource === "voice" || remoteAudioLevel > 8 ? "speaking" : "responding")
+      : isAnalyzing || agentState === "thinking"
+        ? "thinking"
+        : isListeningLive || agentState === "listening"
+          ? "listening"
+          : "ready";
   const combinedError = connectionError || analysisError || clientError;
 
   const appendLog = (message: string) => setLogs((currentLogs) => [`${getTimeLabel()}  ${message}`, ...currentLogs].slice(0, 18));
@@ -108,6 +142,7 @@ function App() {
 
   useEffect(() => { clearVideoContainers(); }, [isDebugMode]);
   useEffect(() => { joinedRef.current = joined; }, [joined]);
+  useEffect(() => { micEnabledRef.current = micEnabled; }, [micEnabled]);
   useEffect(() => { selectedEmotionRef.current = selectedEmotion; }, [selectedEmotion]);
 
   useEffect(() => {
@@ -145,20 +180,163 @@ function App() {
   }, [client, session?.uid]);
 
   useEffect(() => {
-    if (!micTrack || !joined || isDebugMode) return;
+    if (!micTrack || !joined || isDebugMode || !micEnabled) {
+      setLocalAudioLevel(0);
+      return;
+    }
     const intervalId = window.setInterval(() => {
       const nextLevel = normalizeTrackVolume(micTrack.getVolumeLevel());
       setLocalAudioLevel(nextLevel);
       setAudioSignalDetected((currentDetected) => currentDetected || nextLevel > 0);
     }, 200);
     return () => window.clearInterval(intervalId);
-  }, [isDebugMode, joined, micTrack]);
+  }, [isDebugMode, joined, micEnabled, micTrack]);
 
   useEffect(() => {
     if (!joined) { setAudioSignalDetected(false); return; }
     setAudioSignalDetected(localAudioLevel > 0 || remoteAudioLevel > 0);
   }, [joined, localAudioLevel, remoteAudioLevel]);
 
+  const clearAvatarSpeechTimeout = () => {
+    if (avatarSpeechTimeoutRef.current !== null) {
+      window.clearTimeout(avatarSpeechTimeoutRef.current);
+      avatarSpeechTimeoutRef.current = null;
+    }
+  };
+  const clearAvatarAudioMeter = () => {
+    if (avatarAudioMeterIntervalRef.current !== null) {
+      window.clearInterval(avatarAudioMeterIntervalRef.current);
+      avatarAudioMeterIntervalRef.current = null;
+    }
+  };
+  const stopAvatarAudioPlayback = () => {
+    clearAvatarAudioMeter();
+    const audio = avatarAudioElementRef.current;
+    if (audio) {
+      audio.pause();
+      audio.src = "";
+      avatarAudioElementRef.current = null;
+    }
+    if (avatarAudioSourceRef.current) {
+      avatarAudioSourceRef.current.disconnect();
+      avatarAudioSourceRef.current = null;
+    }
+    avatarAudioAnalyserRef.current = null;
+    if (avatarAudioUrlRef.current) {
+      URL.revokeObjectURL(avatarAudioUrlRef.current);
+      avatarAudioUrlRef.current = null;
+    }
+  };
+  const stopAvatarPerformance = (preserveText = true) => {
+    clearAvatarSpeechTimeout();
+    clearAvatarAudioMeter();
+    setAvatarSpeaking(false);
+    setAvatarSpeechLevel(0);
+    setAvatarSpeechSource("idle");
+    if (!preserveText) {
+      setAvatarResponseText("");
+      setAvatarSpeechPerformance(null);
+      avatarResponseTurnIdRef.current = null;
+    }
+  };
+  const scheduleAvatarSpeechTimeout = (text: string, durationOverride?: number | null) => {
+    clearAvatarSpeechTimeout();
+    const duration = durationOverride ?? getAvatarSpeechDuration(text);
+    if (!duration) return;
+    avatarSpeechTimeoutRef.current = window.setTimeout(() => {
+      if (avatarAudioElementRef.current) return;
+      stopAvatarPerformance(true);
+    }, duration);
+  };
+  const activateAvatarTextResponse = (
+    text: string,
+    turnId?: number | null,
+    restart = true,
+    performance?: AvatarSpeechPerformance | null
+  ) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const sameTurn = turnId !== undefined && turnId !== null && avatarResponseTurnIdRef.current === turnId;
+    setAvatarResponseText(trimmed);
+    if (performance !== undefined) {
+      setAvatarSpeechPerformance(performance);
+    }
+    setAvatarSpeaking(true);
+    setAvatarSpeechSource((currentSource) => currentSource === "voice" ? currentSource : "text");
+    setAvatarSpeechLevel((currentLevel) => currentLevel > 0 ? currentLevel : 16);
+    if (restart || !sameTurn) {
+      setAvatarSpeechStartedAt(Date.now());
+    }
+    if (turnId !== undefined && turnId !== null) {
+      avatarResponseTurnIdRef.current = turnId;
+    }
+    if (!avatarAudioElementRef.current) {
+      scheduleAvatarSpeechTimeout(trimmed, performance?.durationMs);
+    }
+  };
+  const startAvatarAudioMeter = async (audio: HTMLAudioElement) => {
+    try {
+      const AudioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const context = avatarAudioContextRef.current ?? new AudioContextCtor();
+      avatarAudioContextRef.current = context;
+      if (context.state === "suspended") {
+        await context.resume();
+      }
+      clearAvatarAudioMeter();
+      if (avatarAudioSourceRef.current) {
+        avatarAudioSourceRef.current.disconnect();
+        avatarAudioSourceRef.current = null;
+      }
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.72;
+      const source = context.createMediaElementSource(audio);
+      source.connect(analyser);
+      analyser.connect(context.destination);
+      avatarAudioSourceRef.current = source;
+      avatarAudioAnalyserRef.current = analyser;
+      const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      avatarAudioMeterIntervalRef.current = window.setInterval(() => {
+        analyser.getByteFrequencyData(frequencyData);
+        const average = frequencyData.reduce((sum, value) => sum + value, 0) / Math.max(frequencyData.length, 1);
+        const peak = frequencyData.reduce((maxPeak, value) => Math.max(maxPeak, value), 0);
+        const nextLevel = clamp(Math.round(average * 0.48 + peak * 0.28), 10, 100);
+        setAvatarSpeechLevel(nextLevel);
+      }, 80);
+    } catch {
+      setAvatarSpeechLevel(18);
+    }
+  };
+  const playAvatarSpeechResponse = async ({ audioBlob, performance }: AvatarSpeechResponse, responseText: string) => {
+    stopAvatarAudioPlayback();
+    clearAvatarSpeechTimeout();
+    const audioUrl = URL.createObjectURL(audioBlob);
+    avatarAudioUrlRef.current = audioUrl;
+    const audio = new Audio(audioUrl);
+    avatarAudioElementRef.current = audio;
+    setAvatarResponseText(responseText.trim());
+    setAvatarSpeechPerformance(performance);
+    setAvatarSpeaking(true);
+    setAvatarSpeechSource("voice");
+    setAvatarSpeechStartedAt(Date.now());
+    setAvatarSpeechLevel(18);
+    audio.onended = () => {
+      stopAvatarAudioPlayback();
+      stopAvatarPerformance(true);
+    };
+    audio.onerror = () => {
+      stopAvatarAudioPlayback();
+      activateAvatarTextResponse(responseText, null, true, performance);
+    };
+    await startAvatarAudioMeter(audio);
+    try {
+      await audio.play();
+    } catch {
+      stopAvatarAudioPlayback();
+      activateAvatarTextResponse(responseText, null, true, performance);
+    }
+  };
   const clearLiveAudioStream = () => { liveAudioStreamRef.current?.getTracks().forEach((track) => track.stop()); liveAudioStreamRef.current = null; };
   const clearLiveChunkTimeout = () => {
     if (liveChunkTimeoutRef.current !== null) { window.clearTimeout(liveChunkTimeoutRef.current); liveChunkTimeoutRef.current = null; }
@@ -177,6 +355,10 @@ function App() {
     setTranscriptEntries([]);
     setAnalysisResult(null);
     setConversationSessionId(null);
+    setAvatarResponseText("");
+    setAvatarSpeechPerformance(null);
+    avatarResponseTurnIdRef.current = null;
+    stopAvatarPerformance(false);
   };
   const cleanupLocalTracks = () => {
     cameraTrackRef.current?.stop();
@@ -192,6 +374,8 @@ function App() {
     setLocalAudioLevel(0);
     setRemoteAudioLevel(0);
     setAudioSignalDetected(false);
+    stopAvatarAudioPlayback();
+    stopAvatarPerformance(false);
   };
 
   const sendLiveAudioChunk = async (audioBlob: Blob, mimeType: string, emotion: SupportedEmotion) => {
@@ -208,13 +392,11 @@ function App() {
       setConversationSessionId(result.sessionId ?? null);
       setAnalysisResult(result);
       setTranscriptEntries((currentEntries) => [{ id: chunkId, createdAt: getTimeLabel(), transcript: result.transcript, emotion }, ...currentEntries].slice(0, 6));
+      activateAvatarTextResponse(result.reply, Number(chunkId), true, null);
       appendLog(`Live response updated for ${emotion}.`);
       try {
-        const audioBlob = await requestAvatarSpeech(backendBaseUrl, result.reply, emotion);
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        audio.onended = () => URL.revokeObjectURL(audioUrl);
-        await audio.play();
+        const speechResponse = await requestAvatarSpeech(backendBaseUrl, result.reply, emotion);
+        await playAvatarSpeechResponse(speechResponse, result.reply);
       } catch (speechErr) {
         appendLog(`Avatar speech failed: ${speechErr instanceof Error ? speechErr.message : "unknown error"}`);
       }
@@ -233,7 +415,7 @@ function App() {
   };
 
   async function startLiveListeningChunk() {
-    if (!liveLoopEnabledRef.current || !joinedRef.current || !micTrackRef.current) return;
+    if (!liveLoopEnabledRef.current || !joinedRef.current || !micTrackRef.current || !micEnabledRef.current) return;
     const mimeType = getSupportedLiveAudioMimeType();
     if (!mimeType) {
       setAnalysisError("This browser does not support live audio chunk recording for analysis.");
@@ -315,6 +497,10 @@ function App() {
     return () => { void leaveChannel(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => () => {
+    clearAvatarSpeechTimeout();
+    stopAvatarAudioPlayback();
+  }, []);
 
   const resolveSession = async (requestedMode: AppMode, channelName: string) => {
     try { return await fetchAgoraSession(backendBaseUrl, requestedMode, channelName); }
@@ -344,11 +530,12 @@ function App() {
         return;
       }
       const [microphoneTrack, nextCameraTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+      await microphoneTrack.setMuted(false);
       micTrackRef.current = microphoneTrack;
       cameraTrackRef.current = nextCameraTrack;
       setMicTrack(microphoneTrack);
       setCameraTrack(nextCameraTrack);
-      setMicEnabled(microphoneTrack.enabled);
+      setMicEnabled(true);
       setCameraEnabled(nextCameraTrack.enabled);
       await client.publish([microphoneTrack, nextCameraTrack]);
       renderLocalPreview(nextCameraTrack);
@@ -379,6 +566,14 @@ function App() {
         });
         convAI.on(EConversationalAIAPIEvents.AGENT_STATE_CHANGED, (_uid: string, event: TStateChangeEvent) => {
           setAgentState(event.state);
+          if (event.state === "speaking") {
+            setAvatarSpeaking(true);
+            setAvatarSpeechSource((currentSource) => currentSource === "idle" ? "text" : currentSource);
+          } else if (event.state === "thinking" || event.state === "listening" || event.state === "idle") {
+            if (!avatarAudioElementRef.current) {
+              stopAvatarPerformance(true);
+            }
+          }
           appendLog(`Agent state: ${event.state}`);
         });
         convAI.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (history: ITranscriptHelperItem<Partial<IUserTranscription | IAgentTranscription>>[]) => {
@@ -387,6 +582,9 @@ function App() {
             setTranscriptEntries((prev) =>
               [{ id: String(Date.now()), createdAt: getTimeLabel(), transcript: last.text ?? "", emotion: selectedEmotionRef.current }, ...prev].slice(0, 6)
             );
+            if (last.metadata?.object === "assistant.transcription" && last.text?.trim()) {
+              activateAvatarTextResponse(last.text, last.turn_id, last.turn_id !== avatarResponseTurnIdRef.current, null);
+            }
           }
         });
         convAI.on(EConversationalAIAPIEvents.AGENT_ERROR, (_uid: string, err: TModuleError) => {
@@ -421,8 +619,11 @@ function App() {
   useEffect(() => {
     if (isDebugMode) return;
     if (!joined || !micTrackRef.current) {
-      setIsListeningLive(false);
-      setLiveStatus("Join the channel to start live listening.");
+      stopLiveListeningLoop("Join the channel to start live listening.");
+      return;
+    }
+    if (!micEnabled) {
+      stopLiveListeningLoop("Microphone is muted. Unmute to resume live listening.");
       return;
     }
     if (liveLoopEnabledRef.current) return;
@@ -431,7 +632,7 @@ function App() {
     setLiveStatus(`Listening live for ${selectedEmotion}.`);
     appendLog(`Live listening started for ${selectedEmotion}.`);
     void startLiveListeningChunk();
-  }, [isDebugMode, joined, selectedEmotion]);
+  }, [isDebugMode, joined, micEnabled, selectedEmotion]);
 
   useEffect(() => {
     const emotionKey = selectedEmotion;
@@ -456,9 +657,10 @@ function App() {
 
   const toggleMic = async () => {
     if (!micTrackRef.current) { setConnectionError("Join the channel before toggling the microphone."); return; }
-    const nextEnabled = !micTrackRef.current.enabled;
-    await micTrackRef.current.setEnabled(nextEnabled);
+    const nextEnabled = !micEnabledRef.current;
+    await micTrackRef.current.setMuted(!nextEnabled);
     setMicEnabled(nextEnabled);
+    setLocalAudioLevel(0);
     appendLog(nextEnabled ? "Microphone enabled." : "Microphone muted.");
   };
 
@@ -502,10 +704,14 @@ function App() {
           <EmotionAvatarTile
             currentEmotion={currentEmotion}
             selectedEmotion={selectedEmotion}
-            audioSignalDetected={audioSignalDetected}
+            avatarSpeaking={avatarStageSpeaking}
             avatarStageStatus={avatarStageStatus}
             avatarSignalLevel={avatarSignalLevel}
             avatarMeterSegments={avatarMeterSegments}
+            avatarSpeechSource={avatarSpeechSource}
+            avatarResponseText={avatarResponseText}
+            avatarSpeechStartedAt={avatarSpeechStartedAt}
+            avatarSpeechPerformance={avatarSpeechPerformance}
             joined={joined}
             session={session}
             channelInput={channelInput}

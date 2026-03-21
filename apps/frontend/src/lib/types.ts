@@ -15,4 +15,6 @@ export type EmotionConfig = {
   accent: string;
   glow: string;
   description: string;
+  avatarMode?: "canvas" | "image";
+  imageSrc?: string;
 };
