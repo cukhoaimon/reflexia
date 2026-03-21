@@ -18,44 +18,54 @@ export type AgoraAgentSession = {
   channel: string;
 };
 
-export type AnalysisSpeech = {
-  filename: string;
-  contentType: string;
-  path: string;
-  url: string;
-};
-
 export type AnalysisResponse = {
   transcript: string;
   emotion: string;
   reply: string;
   sessionId?: string | null;
-  toolEvents?: Array<{
-    tool: string;
-    query?: string;
-    result?: unknown;
-  }>;
-  speech?: AnalysisSpeech;
-  ignored?: boolean;
-  reason?: string;
+  toolEvents?: Array<unknown>;
 };
 
 export type ChatResponse = {
-  message: string;
-  sessionId?: string | null;
+  sessionId: string;
   emotion: string;
   reply: string;
-  toolEvents?: Array<{
-    tool: string;
-    query?: string;
-    result?: unknown;
-  }>;
-  output?: {
-    directory: string;
-    timestampedFilename: string;
-    latestFilename: string;
-  };
+  toolEvents?: Array<unknown>;
 };
+
+export type AvatarVoiceCatalog = {
+  configured: {
+    default: string | null;
+    joy: string | null;
+    sadness: string | null;
+    anger: string | null;
+    fear: string | null;
+    disgust: string | null;
+  };
+  persisted: {
+    default: string | null;
+    joy: string | null;
+    sadness: string | null;
+    anger: string | null;
+    fear: string | null;
+    disgust: string | null;
+  };
+  fromEnv: {
+    default: string | null;
+    joy: string | null;
+    sadness: string | null;
+    anger: string | null;
+    fear: string | null;
+    disgust: string | null;
+  };
+  voices: Array<{
+    voiceId: string;
+    name: string;
+    category: string;
+  }>;
+};
+
+export type AvatarVoiceMapping = AvatarVoiceCatalog["configured"];
 
 async function getErrorMessage(response: Response) {
   try {
@@ -126,16 +136,12 @@ export async function analyzeLiveAudio(
   file: File,
   emotion: string,
   sessionId?: string
-) {
+): Promise<AnalysisResponse | null> {
   const url = new URL("/analyze-audio/live", backendBaseUrl);
   const formData = new FormData();
-
   formData.append("file", file);
   formData.append("emotion", emotion);
-
-  if (sessionId) {
-    formData.append("sessionId", sessionId);
-  }
+  if (sessionId) formData.append("sessionId", sessionId);
 
   const response = await fetch(url.toString(), {
     method: "POST",
@@ -143,14 +149,7 @@ export async function analyzeLiveAudio(
   });
 
   if (response.status === 204) {
-    return {
-      transcript: "",
-      emotion,
-      reply: "",
-      sessionId: sessionId ?? null,
-      ignored: true,
-      reason: "empty_transcript",
-    } satisfies AnalysisResponse;
+    return null;
   }
 
   if (!response.ok) {
@@ -160,13 +159,14 @@ export async function analyzeLiveAudio(
   return (await response.json()) as AnalysisResponse;
 }
 
-export async function chatWithBackend(
+export async function sendChatMessage(
   backendBaseUrl: string,
   message: string,
   emotion: string,
   sessionId?: string
 ) {
   const url = new URL("/chat", backendBaseUrl);
+
   const response = await fetch(url.toString(), {
     method: "POST",
     headers: {
@@ -184,4 +184,78 @@ export async function chatWithBackend(
   }
 
   return (await response.json()) as ChatResponse;
+}
+
+export async function clearChatSession(
+  backendBaseUrl: string,
+  sessionId: string
+) {
+  const url = new URL(`/chat/${sessionId}`, backendBaseUrl);
+
+  const response = await fetch(url.toString(), {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+}
+
+export async function requestAvatarSpeech(
+  backendBaseUrl: string,
+  text: string,
+  emotion: string
+) {
+  const url = new URL("/avatar/speech", backendBaseUrl);
+
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text,
+      emotion,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return await response.blob();
+}
+
+export async function fetchAvatarVoiceCatalog(backendBaseUrl: string) {
+  const url = new URL("/avatar/voices", backendBaseUrl);
+  const response = await fetch(url.toString());
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return (await response.json()) as AvatarVoiceCatalog;
+}
+
+export async function saveAvatarVoiceCatalog(
+  backendBaseUrl: string,
+  mapping: AvatarVoiceMapping
+) {
+  const url = new URL("/avatar/voices", backendBaseUrl);
+  const response = await fetch(url.toString(), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mapping }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return (await response.json()) as {
+    saved: AvatarVoiceMapping;
+    catalog: AvatarVoiceCatalog;
+  };
 }
