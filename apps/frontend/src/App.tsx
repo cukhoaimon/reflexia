@@ -45,14 +45,11 @@ function App() {
   const localContainerRef = useRef<HTMLDivElement>(null);
   const cameraTrackRef = useRef<ICameraVideoTrack | null>(null);
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const agentSessionRef = useRef<AgoraAgentSession | null>(null);
-  const selectedEmotionRef = useRef<SupportedEmotion>("joy");
+  const agentSessionRef = useRef<AgoraSession | null>(null);
   const hasAutoJoinedRef = useRef(false);
   const selectedEmotionRef = useRef<SupportedEmotion>("joy");
-  const previousEmotionKeyRef = useRef("");
   const joinedRef = useRef(false);
-  const selectedEmotionsRef = useRef<SupportedEmotion[]>(["joy"]);
-  const liveAudioStreamRef = useRef<MediaStream | null>(null);
+const liveAudioStreamRef = useRef<MediaStream | null>(null);
   const liveRecorderRef = useRef<MediaRecorder | null>(null);
   const liveChunkPartsRef = useRef<Blob[]>([]);
   const liveChunkTimeoutRef = useRef<number | null>(null);
@@ -501,7 +498,7 @@ function App() {
             <div className="control-row">
               <button type="button" className={cameraEnabled ? "control-chip active" : "control-chip"} onClick={() => void toggleCamera()} disabled={!cameraTrack}>{cameraEnabled ? "Turn camera off" : "Turn camera on"}</button>
               <button type="button" className={micEnabled ? "control-chip active" : "control-chip"} onClick={() => void toggleMic()} disabled={!micTrack}>{micEnabled ? "Mute microphone" : "Enable microphone"}</button>
-            </div><button type="button" className="control-chip" onClick={openDebugViewer}>Open debug tab</button></> : null}
+            </div>{!isDebugMode ? <button type="button" className="control-chip" onClick={openDebugViewer}>Open debug tab</button> : null}
             <dl className="meta-grid">
               <div><dt>Mode</dt><dd>{mode}</dd></div>
               <div><dt>Status</dt><dd>{joined ? "joined" : "idle"}</dd></div>
@@ -528,36 +525,10 @@ function App() {
                   </article>
                 ))}
               </div>
-            </div>
-            <div className="emotion-picker-grid emotion-picker-grid-tile">
-              {SUPPORTED_EMOTIONS.map((emotion) => {
-                const config = EMOTIONS.find((entry) => entry.key === emotion) ?? EMOTIONS[0];
-                const selected = selectedEmotions.includes(emotion);
-                return <button key={emotion} type="button" className={selected ? "emotion-option selected" : "emotion-option"} onClick={() => toggleEmotion(emotion)}><span>{config.title}</span><small>{config.mood}</small></button>;
-              })}
-            </div>
-          </section>
-          <section className="panel">
-            <div className="panel-header"><div><p className="eyebrow">Live Response</p><h2>Latest AI output</h2></div></div>
-            {analysisResult ? <div className="stack-panel">
-              <article className="analysis-card analysis-card-wide"><p className="eyebrow">Transcript</p><p className="transcript">{analysisResult.transcript}</p></article>
-              <article className="analysis-card"><p className="eyebrow">{analysisResult.emotion}</p><p className="analysis-response">{analysisResult.reply}</p></article>
-            </div> : <p className="empty-copy">No live transcript yet. Join the room and start speaking.</p>}
-          </section>
-          <section className="panel">
-            <div className="panel-header"><div><p className="eyebrow">Transcript Chunks</p><h2>Recent segments</h2></div></div>
-            <div className="timeline-list">
-              {transcriptEntries.length === 0 ? <p className="empty-copy">No live chunks processed yet.</p> : transcriptEntries.map((entry) => (
-                <article key={entry.id} className="timeline-card">
-                  <div className="timeline-meta"><strong>{entry.createdAt}</strong><span>{entry.emotion}</span></div>
-                  <p className="timeline-text">{entry.transcript}</p>
-                </article>
-              ))}
-            </div>
-          </section>
+            </section>
+          </> : null}
         </aside>
       </section>
-      <div ref={remoteContainerRef} style={{ display: "none" }} aria-hidden="true" />
     </main>
   );
 }
