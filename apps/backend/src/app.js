@@ -1,0 +1,54 @@
+const express = require("express");
+const rateLimit = require("express-rate-limit");
+const multer = require("multer");
+
+const analyzeAudioRouter = require("./routes/analyzeAudioRoute");
+
+const app = express();
+
+app.use(express.json());
+
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      error: "Too many requests. Please try again in a moment."
+    }
+  })
+);
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
+app.use("/", analyzeAudioRouter);
+
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found." });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  if (err instanceof multer.MulterError) {
+    const message =
+      err.code === "LIMIT_FILE_SIZE"
+        ? "File is too large. The maximum allowed size is 25MB."
+        : err.message;
+
+    return res.status(400).json({ error: message });
+  }
+
+  const statusCode = err.statusCode || 500;
+
+  res.status(statusCode).json({
+    error: err.message || "Internal server error."
+  });
+});
+
+module.exports = app;

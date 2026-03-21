@@ -1,2 +1,0 @@
-"""emotalk backend package."""
-

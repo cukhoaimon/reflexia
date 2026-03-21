@@ -1,39 +1,97 @@
-# Backend (Python / FastAPI)
+# Audio Emotion Backend
 
-Production-oriented Python backend scaffold for an AI-heavy application.
+Node.js + Express backend that accepts an uploaded audio file, transcribes it with OpenAI, and returns multiple emotion-based AI responses.
 
-## Stack
+## Features
 
-- FastAPI + Uvicorn
-- Pydantic Settings for environment configuration
-- Ruff (lint/format), Pytest, Mypy
-- Docker image for deployment
-- `uv` for dependency and virtual environment management
+- Upload `.wav`, `.mp4`, or `.m4a` audio files with `multer`
+- Validate a JSON `emotions` array with a max of 3 emotions
+- Transcribe audio with the OpenAI transcription API
+- Generate one chat response per emotion in parallel with `Promise.all`
+- Basic rate limiting for API safety
+- Save each successful result to `outputs/latest-output.json` and a timestamped JSON file
+- Clean modular structure for hackathon-friendly maintenance
 
-## Structure
+## Project Structure
 
-- `src/emotalk_backend/` application package
-- `src/emotalk_backend/api/routes/health.py` health endpoint
-- `tests/` backend tests
+```text
+src/
+  config/
+  controllers/
+  middleware/
+  routes/
+  services/
+  utils/
+```
 
-## Quick Start
+## Setup
 
-1. Install `uv` if not installed:
-   - https://docs.astral.sh/uv/getting-started/installation/
-2. Install dependencies:
-   - `make install`
-3. Run service in dev mode:
-   - `make dev`
+```bash
+npm install
+```
 
-Service URL: `http://localhost:8000`
-OpenAPI docs: `http://localhost:8000/docs`
+Create a `.env` file:
 
-## Environment
+```env
+OPENAI_API_KEY=your_key_here
+PORT=3000
+```
 
-Copy `.env.example` to `.env` and adjust values.
+Run the server:
 
-## Team Conventions
+```bash
+npm run dev
+```
 
-- Keep API routes under `api/routes`.
-- Keep settings and infrastructure concerns in `config.py`.
-- Keep AI orchestration modules isolated (for example under `src/emotalk_backend/ai/`) to avoid coupling with HTTP layers.
+Or:
+
+```bash
+npm start
+```
+
+## API
+
+### `POST /analyze-audio`
+
+Form-data fields:
+
+- `file`: `.wav`, `.mp4`, or `.m4a` audio file
+- `emotions`: JSON string such as `["joy","fear"]`
+
+### Example response
+
+```json
+{
+  "transcript": "I failed my exam, what should I do?",
+  "responses": [
+    {
+      "emotion": "joy",
+      "text": "This is just a setback! You can absolutely recover from this."
+    },
+    {
+      "emotion": "fear",
+      "text": "If you do not act quickly, this could affect your next steps, so make a plan right away."
+    }
+  ],
+  "output": {
+    "directory": "D:\\My Progress\\lotus\\backend\\outputs",
+    "timestampedFilename": "analysis-2026-03-21T01-23-45-000Z.json",
+    "latestFilename": "latest-output.json"
+  }
+}
+```
+
+## Notes
+
+- Supported emotions: `joy`, `sadness`, `anger`, `fear`, `disgust`
+- Invalid file types, missing emotions, more than 3 emotions, and OpenAI API failures return JSON errors
+- Uploaded files are deleted after each request finishes
+- Successful requests also write JSON output files into the `outputs/` folder
+
+## Example curl
+
+```bash
+curl -X POST http://localhost:3000/analyze-audio \
+  -F "file=@./sample.wav" \
+  -F "emotions=[\"joy\",\"sadness\"]"
+```
