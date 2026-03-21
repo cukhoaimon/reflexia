@@ -12,3 +12,4 @@ coverage
 *.tsbuildinfo
 worktrees/
 apps/backend/data/avatar-voice-config.json
+.gitnexus
