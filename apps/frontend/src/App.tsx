@@ -9,11 +9,11 @@ import AgoraRTM from "agora-rtm";
 import { ConversationalAIAPI, ETranscriptHelperMode, EConversationalAIAPIEvents } from "./lib/conversational-ai-api";
 import type { TStateChangeEvent, TModuleError, ITranscriptHelperItem, IUserTranscription, IAgentTranscription } from "./lib/conversational-ai-api";
 import { EMOTIONS, LIVE_CHUNK_DURATION_MS, LIVE_CHUNK_GAP_MS, MIN_ANALYSIS_BLOB_SIZE_BYTES } from "./lib/constants";
-import { SupportedEmotion } from "./lib/emotions";
+import { SupportedEmotion, SUPPORTED_EMOTIONS } from "./lib/emotions";
 import { TranscriptEntry } from "./lib/types";
 
 const envAppId = import.meta.env.VITE_AGORA_APP_ID ?? "";
-const envChannel = import.meta.env.VITE_AGORA_CHANNEL ?? "emotalk";
+const envChannel = import.meta.env.VITE_AGORA_CHANNEL ?? "reflexia";
 const envToken = import.meta.env.VITE_AGORA_TOKEN || null;
 const envUidRaw = import.meta.env.VITE_AGORA_UID;
 const backendBaseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3000";
@@ -22,11 +22,92 @@ function parseEnvUid(rawUid: string | undefined) { if (!rawUid) return null; con
 function getModeFromLocation(): AppMode { const searchParams = new URLSearchParams(window.location.search); return searchParams.get("mode") === "debug" ? "debug" : "broadcast"; }
 function getChannelFromLocation() { const searchParams = new URLSearchParams(window.location.search); return searchParams.get("channel") || envChannel; }
 function shouldAutoJoin() { const searchParams = new URLSearchParams(window.location.search); return searchParams.get("autojoin") === "1"; }
+function shouldShowDevTools() { return new URLSearchParams(window.location.search).get("devtools") === "1"; }
 function getTimeLabel() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 function getSupportedLiveAudioMimeType() { const mimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]; return mimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? ""; }
 function getLiveAudioExtension(mimeType: string) { return mimeType.includes("mp4") ? "mp4" : "webm"; }
-function getAudioMeterSegments(level: number) { const normalizedLevel = Math.max(0, Math.min(level, 100)); return Array.from({ length: 10 }, (_, index) => normalizedLevel >= (index + 1) * 10); }
 function normalizeTrackVolume(level: number) { return Math.max(0, Math.min(Math.round(level * 100), 100)); }
+
+/* ── SVG Icons ── */
+function IconMic() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
+  );
+}
+
+function IconMicOff() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="1" y1="1" x2="23" y2="23" />
+      <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
+      <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
+  );
+}
+
+function IconCamera() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M23 7 16 12 23 17z" />
+      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+function IconCameraOff() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  );
+}
+
+function IconPhoneOff() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.42 19.42 0 0 1 4.69 12" />
+      <path d="M6.61 6.61A15.5 15.5 0 0 0 4.69 12" />
+      <path d="M4.69 12A19.79 19.79 0 0 1 1.61 3.18 2 2 0 0 1 3.6 1h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 8.91" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  );
+}
+
+function IconSidebar() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <line x1="9" y1="3" x2="9" y2="21" />
+    </svg>
+  );
+}
+
+function IconClose() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function IconCC() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="5" width="20" height="14" rx="2" ry="2" />
+      <path d="M8 12a2 2 0 1 0 0-2" />
+      <path d="M14 12a2 2 0 1 0 0-2" />
+    </svg>
+  );
+}
 
 function App() {
   const mode = getModeFromLocation();
@@ -70,20 +151,26 @@ function App() {
   const [selectedEmotion, setSelectedEmotion] = useState<SupportedEmotion>("joy");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isListeningLive, setIsListeningLive] = useState(false);
-  const [liveStatus, setLiveStatus] = useState("Join the channel to start live listening.");
+  const [liveStatus, setLiveStatus] = useState("Join the call to get started.");
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [conversationSessionId, setConversationSessionId] = useState<string | null>(null);
   const [localAudioLevel, setLocalAudioLevel] = useState(0);
   const [remoteAudioLevel, setRemoteAudioLevel] = useState(0);
   const [audioSignalDetected, setAudioSignalDetected] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+  const [currentTime, setCurrentTime] = useState(getTimeLabel());
   const currentEmotion = EMOTIONS.find((emotion) => emotion.key === selectedEmotion) ?? EMOTIONS[0];
-  const localMeterSegments = getAudioMeterSegments(localAudioLevel);
   const avatarSignalLevel = Math.max(localAudioLevel, remoteAudioLevel);
-  const avatarMeterSegments = getAudioMeterSegments(avatarSignalLevel);
   const micStatus = !joined ? "offline" : !micEnabled ? "muted" : localAudioLevel > 8 ? "speaking" : "live";
-  const avatarStageStatus = !joined ? "idle" : audioSignalDetected ? "live" : isAnalyzing ? "tracking" : "ready";
-  const combinedError = connectionError || analysisError || clientError;
+  const combinedError = connectionError || agentError || analysisError || clientError;
+
+  // Clock tick
+  useEffect(() => {
+    const interval = setInterval(() => setCurrentTime(getTimeLabel()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const appendLog = (message: string) => setLogs((currentLogs) => [`${getTimeLabel()}  ${message}`, ...currentLogs].slice(0, 18));
   const renderEmptyState = (container: HTMLDivElement | null, title: string, message: string, accentClass = "") => {
@@ -91,7 +178,7 @@ function App() {
     container.innerHTML = "";
     const emptyState = document.createElement("div");
     emptyState.className = `video-placeholder ${accentClass}`.trim();
-    emptyState.innerHTML = `<strong>${title}</strong><p>${message}</p>`;
+    emptyState.innerHTML = `<div class="video-placeholder-icon">📷</div><strong>${title}</strong><p>${message}</p>`;
     container.appendChild(emptyState);
   };
   const renderLocalPreview = (track: ICameraVideoTrack) => {
@@ -103,12 +190,22 @@ function App() {
     track.play(player);
   };
   const clearVideoContainers = () => {
-    renderEmptyState(localContainerRef.current, isDebugMode ? "Viewer mode" : "Local preview", isDebugMode ? "This tab subscribes only. Open the main screen to publish camera and microphone." : "Join the room to preview your own published camera.");
+    renderEmptyState(localContainerRef.current, isDebugMode ? "Viewer mode" : "Camera off", isDebugMode ? "This tab subscribes only." : "Your camera will appear here after joining.");
   };
 
   useEffect(() => { clearVideoContainers(); }, [isDebugMode]);
   useEffect(() => { joinedRef.current = joined; }, [joined]);
   useEffect(() => { selectedEmotionRef.current = selectedEmotion; }, [selectedEmotion]);
+
+  // Render camera preview after the in-call DOM mounts (joined=true).
+  // Must run after React commits the new DOM, otherwise the track plays
+  // into the pre-join container which is about to be unmounted.
+  useEffect(() => {
+    if (joined && cameraTrackRef.current) {
+      renderLocalPreview(cameraTrackRef.current);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joined]);
 
   useEffect(() => {
     if (!client) return;
@@ -197,11 +294,11 @@ function App() {
   const sendLiveAudioChunk = async (audioBlob: Blob, mimeType: string, emotion: SupportedEmotion) => {
     const chunkId = `${Date.now()}`;
     const requestId = ++liveRequestSequenceRef.current;
-    const file = new File([audioBlob], `emotalk-live-${chunkId}.${getLiveAudioExtension(mimeType)}`, { type: mimeType });
+    const file = new File([audioBlob], `reflexia-live-${chunkId}.${getLiveAudioExtension(mimeType)}`, { type: mimeType });
     try {
       setIsAnalyzing(true);
       setAnalysisError(null);
-      setLiveStatus(`Analyzing live speech for ${emotion}.`);
+      setLiveStatus("Processing…");
       const result = await analyzeLiveAudio(backendBaseUrl, file, emotion, conversationSessionId ?? undefined);
       if (requestId !== liveRequestSequenceRef.current) return;
       if (result === null) return;
@@ -249,7 +346,7 @@ function App() {
     liveAudioStreamRef.current = audioStream;
     liveRecorderRef.current = recorder;
     setIsListeningLive(true);
-    setLiveStatus(`Listening live for ${emotion}.`);
+    setLiveStatus("Listening…");
     recorder.ondataavailable = (event) => { if (event.data.size > 0) liveChunkPartsRef.current.push(event.data); };
     recorder.onerror = () => {
       setAnalysisError("MediaRecorder failed during live listening.");
@@ -265,7 +362,7 @@ function App() {
       const nextEmotion = selectedEmotionRef.current;
       const audioBlob = new Blob(parts, { type: mimeType });
       if (audioBlob.size < MIN_ANALYSIS_BLOB_SIZE_BYTES) {
-        setLiveStatus("Listening for speech...");
+        setLiveStatus("Listening…");
         window.setTimeout(() => { void startLiveListeningChunk(); }, LIVE_CHUNK_GAP_MS);
         return;
       }
@@ -281,28 +378,26 @@ function App() {
   const leaveChannel = async () => {
     try {
       if (!client) throw new Error(clientError || "Agora RTC client is unavailable.");
+      stopLiveListeningLoop();
       cleanupLocalTracks();
       clearVideoContainers();
-
-      // Stop agent (best-effort)
+      // Unsubscribe from ConvAI events before stopping the agent so that
+      // any teardown errors from the Agora/OpenAI Realtime API don't surface in the UI.
+      try { const convAI = ConversationalAIAPI.getInstance(); convAI.unsubscribe(); convAI.destroy(); } catch { /* not initialized */ }
       if (agentSessionRef.current) {
         try { await stopAgoraAgent(backendBaseUrl, agentSessionRef.current.agent_id); } catch { /* best-effort */ }
         agentSessionRef.current = null;
         setAgentSession(null);
       }
-
-      // Cleanup ConversationalAI (best-effort)
-      try { const convAI = ConversationalAIAPI.getInstance(); convAI.unsubscribe(); convAI.destroy(); } catch { /* not initialized */ }
-
-      // Cleanup RTM (best-effort)
       if (rtmClientRef.current) {
         try { await rtmClientRef.current.logout(); } catch { /* best-effort */ }
         rtmClientRef.current = null;
       }
-
       await client.leave();
       setJoined(false);
       setSession(null);
+      setAgentError(null);
+      setConnectionError(null);
       resetAnalysisState();
       appendLog("Left the Agora channel.");
     } catch (error) {
@@ -343,7 +438,13 @@ function App() {
         appendLog(`Joined debug viewer for channel ${nextSession.channel} as ${joinedUid}.`);
         return;
       }
-      const [microphoneTrack, nextCameraTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+      let microphoneTrack = micTrackRef.current;
+      let nextCameraTrack = cameraTrackRef.current;
+      if (!microphoneTrack || !nextCameraTrack) {
+        if (nextCameraTrack) { nextCameraTrack.stop(); nextCameraTrack.close(); cameraTrackRef.current = null; }
+        if (microphoneTrack) { microphoneTrack.stop(); microphoneTrack.close(); micTrackRef.current = null; }
+        [microphoneTrack, nextCameraTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+      }
       micTrackRef.current = microphoneTrack;
       cameraTrackRef.current = nextCameraTrack;
       setMicTrack(microphoneTrack);
@@ -351,11 +452,10 @@ function App() {
       setMicEnabled(microphoneTrack.enabled);
       setCameraEnabled(nextCameraTrack.enabled);
       await client.publish([microphoneTrack, nextCameraTrack]);
-      renderLocalPreview(nextCameraTrack);
       setSession({ ...nextSession, uid: joinedUid });
       setJoined(true);
 
-      // Start agent + RTM (non-fatal — call still proceeds if this fails)
+      // Start agent + RTM
       try {
         const agentSess = await startAgoraAgent(backendBaseUrl, {
           channel: nextSession.channel,
@@ -422,13 +522,13 @@ function App() {
     if (isDebugMode) return;
     if (!joined || !micTrackRef.current) {
       setIsListeningLive(false);
-      setLiveStatus("Join the channel to start live listening.");
+      setLiveStatus("Join the call to get started.");
       return;
     }
     if (liveLoopEnabledRef.current) return;
     liveLoopEnabledRef.current = true;
     setAnalysisError(null);
-    setLiveStatus(`Listening live for ${selectedEmotion}.`);
+    setLiveStatus("Listening…");
     appendLog(`Live listening started for ${selectedEmotion}.`);
     void startLiveListeningChunk();
   }, [isDebugMode, joined, selectedEmotion]);
@@ -440,12 +540,33 @@ function App() {
     if (isDebugMode) return;
     if (joined) {
       appendLog(`Live emotion updated: ${selectedEmotion}.`);
-      setLiveStatus(`Listening live for ${selectedEmotion}.`);
+      setLiveStatus("Listening…");
     }
   }, [isDebugMode, joined, selectedEmotion]);
 
   const toggleCamera = async () => {
-    if (!cameraTrackRef.current) { setConnectionError("Join the channel before toggling the camera."); return; }
+    if (!joined) {
+      if (!cameraTrackRef.current) {
+        try {
+          const track = await AgoraRTC.createCameraVideoTrack();
+          cameraTrackRef.current = track;
+          setCameraTrack(track);
+          setCameraEnabled(true);
+          renderLocalPreview(track);
+        } catch (err) {
+          setConnectionError(err instanceof Error ? err.message : "Camera access denied.");
+        }
+      } else {
+        cameraTrackRef.current.stop();
+        cameraTrackRef.current.close();
+        cameraTrackRef.current = null;
+        setCameraTrack(null);
+        setCameraEnabled(false);
+        renderEmptyState(localContainerRef.current, "Camera off", "Your camera will appear here after joining.");
+      }
+      return;
+    }
+    if (!cameraTrackRef.current) { setConnectionError("Camera unavailable."); return; }
     const nextEnabled = !cameraTrackRef.current.enabled;
     await cameraTrackRef.current.setEnabled(nextEnabled);
     setCameraEnabled(nextEnabled);
@@ -455,19 +576,30 @@ function App() {
   };
 
   const toggleMic = async () => {
-    if (!micTrackRef.current) { setConnectionError("Join the channel before toggling the microphone."); return; }
+    if (!joined) {
+      if (!micTrackRef.current) {
+        try {
+          const track = await AgoraRTC.createMicrophoneAudioTrack();
+          micTrackRef.current = track;
+          setMicTrack(track);
+          setMicEnabled(true);
+        } catch (err) {
+          setConnectionError(err instanceof Error ? err.message : "Microphone access denied.");
+        }
+      } else {
+        micTrackRef.current.stop();
+        micTrackRef.current.close();
+        micTrackRef.current = null;
+        setMicTrack(null);
+        setMicEnabled(false);
+      }
+      return;
+    }
+    if (!micTrackRef.current) { setConnectionError("Microphone unavailable."); return; }
     const nextEnabled = !micTrackRef.current.enabled;
     await micTrackRef.current.setEnabled(nextEnabled);
     setMicEnabled(nextEnabled);
     appendLog(nextEnabled ? "Microphone enabled." : "Microphone muted.");
-  };
-
-  const openDebugViewer = () => {
-    const debugUrl = new URL(window.location.href);
-    debugUrl.searchParams.set("mode", "debug");
-    debugUrl.searchParams.set("channel", channelInput.trim() || envChannel);
-    debugUrl.searchParams.set("autojoin", "1");
-    window.open(debugUrl.toString(), "_blank", "noopener,noreferrer");
   };
 
   const selectEmotion = (emotion: SupportedEmotion) => {
@@ -475,75 +607,236 @@ function App() {
     setSelectedEmotion(emotion);
   };
 
-  void agentError; // used for future agent error surfacing
-  void agentSession; // used for future agent session surfacing
-  void agentState; // used for future agent state surfacing
+  // Suppress unused variable warnings for vars kept for future use
+  void agentSession;
+  void agentState;
+  void logs;
 
+  /* ═══════════════════════════════════
+     EMOTION PICKER (shared between pre-join and sidebar)
+     ═══════════════════════════════════ */
+  const emotionPicker = (
+    <div className="emotion-picker-grid">
+      {SUPPORTED_EMOTIONS.map((emotion) => {
+        const config = EMOTIONS.find((e) => e.key === emotion) ?? EMOTIONS[0];
+        const isSelected = selectedEmotion === emotion;
+        return (
+          <button
+            key={emotion}
+            type="button"
+            className={isSelected ? "emotion-option selected" : "emotion-option"}
+            onClick={() => selectEmotion(emotion)}
+          >
+            <span className="emotion-option-face">{config.emoji}</span>
+            <span>{config.title}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  /* ═══════════════════════════════════
+     PRE-JOIN SCREEN
+     ═══════════════════════════════════ */
+  if (!joined) {
+    return (
+      <main className="app-shell">
+        <div className="prejoin-screen">
+          <div className="prejoin-brand">
+            <span className="prejoin-brand-name">Reflexia</span>
+            <span className="prejoin-brand-tagline">Emotion-aware video calls, powered by AI</span>
+          </div>
+          <div className="prejoin-card">
+            <div className="prejoin-preview">
+              <LocalCameraPreview
+                containerRef={localContainerRef}
+                joined={false}
+                micEnabled={micEnabled}
+                micStatus={micStatus}
+              />
+              <div className="call-toolbar">
+                <button
+                  className={`toolbar-btn${!micEnabled ? " toolbar-btn--muted" : ""}`}
+                  onClick={() => void toggleMic()}
+                  aria-label="Mic"
+                >
+                  {micEnabled ? <IconMic /> : <IconMicOff />}
+                </button>
+                <button
+                  className={`toolbar-btn${!cameraEnabled ? " toolbar-btn--muted" : ""}`}
+                  onClick={() => void toggleCamera()}
+                  aria-label="Camera"
+                >
+                  {cameraEnabled ? <IconCamera /> : <IconCameraOff />}
+                </button>
+              </div>
+            </div>
+            <div className="prejoin-controls">
+              <h1 className="prejoin-title">Ready to join?</h1>
+              <p className="prejoin-subtitle">
+                Choose an emotion layer to start your Reflexia session.
+              </p>
+              <div className="prejoin-emotion-section">
+                <span className="prejoin-emotion-label">
+                  Emotion: {currentEmotion.emoji} {currentEmotion.title}
+                </span>
+                {emotionPicker}
+              </div>
+              <button
+                className="prejoin-join-btn"
+                onClick={() => void joinChannel()}
+                disabled={connecting}
+              >
+                {connecting ? "Joining…" : "Join now"}
+              </button>
+              {combinedError && (
+                <div className="prejoin-error">{combinedError}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  /* ═══════════════════════════════════
+     IN-CALL VIEW
+     ═══════════════════════════════════ */
   return (
     <main className="app-shell">
-      <section className="hero-bar">
-        <div className="hero-copy-block">
-          <p className="eyebrow">Emotion Call</p>
-          <h1>Emotion Call Studio</h1>
-          <p className="hero-copy">Join once, keep talking naturally, and let the app continuously transcribe live speech into emotion-shaped replies.</p>
+      {/* ── Top Bar ── */}
+      <header className="topbar">
+        <div className="topbar-brand">
+          <span className="topbar-logo">Reflexia</span>
+          <span className="topbar-divider" />
+          <span className="topbar-channel">{session?.channel ?? channelInput}</span>
         </div>
-      </section>
-      <section className="meet-shell">
-        <div className="stage-grid">
-          <LocalCameraPreview
-            containerRef={localContainerRef}
-            joined={joined}
-            cameraEnabled={cameraEnabled}
-            micEnabled={micEnabled}
-            micStatus={micStatus}
-            localAudioLevel={localAudioLevel}
-            localMeterSegments={localMeterSegments}
-          />
-          <EmotionAvatarTile
-            currentEmotion={currentEmotion}
-            selectedEmotion={selectedEmotion}
-            audioSignalDetected={audioSignalDetected}
-            avatarStageStatus={avatarStageStatus}
-            avatarSignalLevel={avatarSignalLevel}
-            avatarMeterSegments={avatarMeterSegments}
-            joined={joined}
-            session={session}
-            channelInput={channelInput}
-            onSelectEmotion={selectEmotion}
-          />
-        </div>
-        <aside className="control-rail">
-          <CallSetupPanel
-            channelInput={channelInput}
-            joined={joined}
-            connecting={connecting}
-            cameraEnabled={cameraEnabled}
-            micEnabled={micEnabled}
-            cameraTrack={cameraTrack}
-            micTrack={micTrack}
-            isDebugMode={isDebugMode}
-            mode={mode}
-            session={session}
-            isListeningLive={isListeningLive}
-            currentEmotion={currentEmotion}
-            combinedError={combinedError}
-            onChannelInputChange={setChannelInput}
-            onJoin={() => void joinChannel()}
-            onLeave={() => void leaveChannel()}
-            onToggleCamera={() => void toggleCamera()}
-            onToggleMic={() => void toggleMic()}
-            onOpenDebugViewer={openDebugViewer}
-          />
-          {!isDebugMode ? (
-            <LiveResponsePanel
-              analysisResult={analysisResult}
-              transcriptEntries={transcriptEntries}
-              isAnalyzing={isAnalyzing}
-              liveStatus={liveStatus}
+        <span className="topbar-time">{currentTime}</span>
+      </header>
+
+      {/* ── Main body: stage + sidebar ── */}
+      <div className="meet-body">
+        {/* ── Video stage ── */}
+        <div className="meet-stage">
+          <div className="participants-grid participants-grid--count-2">
+            <LocalCameraPreview
+              containerRef={localContainerRef}
+              joined={joined}
+              micEnabled={micEnabled}
+              micStatus={micStatus}
             />
-          ) : null}
-        </aside>
-      </section>
+            <EmotionAvatarTile
+              currentEmotion={currentEmotion}
+              audioSignalDetected={audioSignalDetected}
+              avatarSignalLevel={avatarSignalLevel}
+            />
+          </div>
+
+          {/* ── Subtitle Overlay ── */}
+          {subtitlesEnabled && transcriptEntries.length > 0 && (
+            <div className="subtitle-overlay">
+              <p className="subtitle-text">{transcriptEntries[0].transcript}</p>
+            </div>
+          )}
+
+          {/* ── Bottom Toolbar ── */}
+          <div className="call-toolbar">
+            <button
+              className={`toolbar-btn${!micEnabled ? " toolbar-btn--muted" : ""}`}
+              onClick={() => void toggleMic()}
+              disabled={!micTrack}
+              aria-label="Mic"
+            >
+              {micEnabled ? <IconMic /> : <IconMicOff />}
+            </button>
+            <button
+              className={`toolbar-btn${!cameraEnabled ? " toolbar-btn--muted" : ""}`}
+              onClick={() => void toggleCamera()}
+              disabled={!cameraTrack}
+              aria-label="Camera"
+            >
+              {cameraEnabled ? <IconCamera /> : <IconCameraOff />}
+            </button>
+            <button
+              className={`toolbar-btn toolbar-btn--cc${subtitlesEnabled ? " active" : ""}`}
+              onClick={() => setSubtitlesEnabled(!subtitlesEnabled)}
+              aria-label="Toggle subtitles"
+              aria-pressed={subtitlesEnabled}
+            >
+              <IconCC />
+            </button>
+            <button
+              className="toolbar-btn toolbar-btn--danger"
+              onClick={() => void leaveChannel()}
+              aria-label="Leave"
+            >
+              <IconPhoneOff />
+            </button>
+            <span className="toolbar-divider" />
+            <button
+              className={`toolbar-btn toolbar-btn--sidebar${sidebarOpen ? " active" : ""}`}
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              aria-label="Toggle sidebar"
+            >
+              <IconSidebar />
+            </button>
+          </div>
+        </div>
+
+        {/* ── Sidebar ── */}
+        {sidebarOpen && (
+          <aside className="sidebar">
+            <div className="sidebar-header">
+              <span className="sidebar-title">Controls</span>
+              <button
+                className="toolbar-btn"
+                style={{ width: 32, height: 32 }}
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Close sidebar"
+              >
+                <IconClose />
+              </button>
+            </div>
+            <div className="sidebar-section">
+              <CallSetupPanel
+                channelInput={channelInput}
+                joined={joined}
+                connecting={connecting}
+                isDebugMode={isDebugMode}
+                mode={mode}
+                session={session}
+                isListeningLive={isListeningLive}
+                currentEmotion={currentEmotion}
+                combinedError={combinedError}
+                showDevTools={!isDebugMode && shouldShowDevTools()}
+                onChannelInputChange={setChannelInput}
+                onJoin={() => void joinChannel()}
+                onLeave={() => void leaveChannel()}
+                onOpenDebugViewer={() => { }}
+              />
+            </div>
+            {!isDebugMode && (
+              <div className="sidebar-section">
+                <p className="eyebrow" style={{ marginBottom: 8 }}>Emotion Layer</p>
+                <p style={{ fontSize: "0.92rem", fontWeight: 500, marginBottom: 10 }}>
+                  {currentEmotion.emoji} {currentEmotion.title}
+                </p>
+                {emotionPicker}
+              </div>
+            )}
+            {!isDebugMode && (
+              <div className="sidebar-section" style={{ flex: 1, overflow: "auto" }}>
+                <LiveResponsePanel
+                  analysisResult={analysisResult}
+                  transcriptEntries={transcriptEntries}
+                  isAnalyzing={isAnalyzing}
+                  liveStatus={liveStatus}
+                />
+              </div>
+            )}
+          </aside>
+        )}
+      </div>
     </main>
   );
 }
