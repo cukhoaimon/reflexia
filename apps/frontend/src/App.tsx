@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import AgoraRTC, { IAgoraRTCClient, IAgoraRTCRemoteUser, ICameraVideoTrack, IMicrophoneAudioTrack } from "agora-rtc-sdk-ng";
-import { AnalysisResponse, AgoraSession, AppMode, analyzeLiveAudio, fetchAgoraSession } from "./lib/api";
+import { AnalysisResponse, AgoraAgentSession, AgoraSession, AppMode, analyzeLiveAudio, fetchAgoraSession } from "./lib/api";
 import { SUPPORTED_EMOTIONS, SupportedEmotion } from "./lib/emotions";
 
 type TranscriptEntry = { id: string; createdAt: string; transcript: string; emotion: SupportedEmotion };
@@ -18,7 +18,7 @@ const EMOTIONS: EmotionConfig[] = [
 ];
 const envAppId = import.meta.env.VITE_AGORA_APP_ID ?? "";
 const envChannel = import.meta.env.VITE_AGORA_CHANNEL ?? "emotalk";
-const envToken = import.meta.env.VITE_AGORA_TOKEN ?? null;
+const envToken = import.meta.env.VITE_AGORA_TOKEN || null;
 const envUidRaw = import.meta.env.VITE_AGORA_UID;
 const backendBaseUrl = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3000";
 
@@ -57,21 +57,24 @@ function App() {
   const remoteContainerRef = useRef<HTMLDivElement>(null);
   const cameraTrackRef = useRef<ICameraVideoTrack | null>(null);
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null);
-  const rtmClientRef = useRef<RTMClient | null>(null);
-  const conversationalApiRef = useRef<ConversationalAIAPI | null>(null);
   const agentSessionRef = useRef<AgoraAgentSession | null>(null);
   const selectedEmotionRef = useRef<SupportedEmotion>("joy");
-  const lastAppliedEmotionRef = useRef<SupportedEmotion | null>(null);
   const hasAutoJoinedRef = useRef(false);
   const joinedRef = useRef(false);
-  const startingAgentRef = useRef(false);
+  const selectedEmotionsRef = useRef<SupportedEmotion[]>(["joy"]);
+  const liveAudioStreamRef = useRef<MediaStream | null>(null);
+  const liveRecorderRef = useRef<MediaRecorder | null>(null);
+  const liveChunkPartsRef = useRef<Blob[]>([]);
+  const liveChunkTimeoutRef = useRef<number | null>(null);
+  const liveLoopEnabledRef = useRef(false);
+  const liveRequestSequenceRef = useRef(0);
+  const previousEmotionKeyRef = useRef("");
   const [joined, setJoined] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [session, setSession] = useState<AgoraSession | null>(null);
-  const [agentSession, setAgentSession] = useState<AgoraAgentSession | null>(null);
-  const [agentState, setAgentState] = useState<EAgentState | null>(null);
   const [channelInput, setChannelInput] = useState(getChannelFromLocation());
   const [cameraTrack, setCameraTrack] = useState<ICameraVideoTrack | null>(null);
   const [micTrack, setMicTrack] = useState<IMicrophoneAudioTrack | null>(null);
@@ -90,9 +93,7 @@ function App() {
   const [audioSignalDetected, setAudioSignalDetected] = useState(false);
   const currentEmotion = EMOTIONS.find((emotion) => emotion.key === (selectedEmotions[0] ?? "joy")) ?? EMOTIONS[0];
   const localMeterSegments = getAudioMeterSegments(localAudioLevel);
-  const remoteMeterSegments = getAudioMeterSegments(remoteAudioLevel);
   const micStatus = !joined ? "offline" : !micEnabled ? "muted" : localAudioLevel > 8 ? "speaking" : "live";
-  const remoteAudioStatus = !joined ? "offline" : remoteAudioLevel > 8 ? "receiving" : "idle";
   const combinedError = connectionError || analysisError || clientError;
 
   const appendLog = (message: string) => setLogs((currentLogs) => [`${getTimeLabel()}  ${message}`, ...currentLogs].slice(0, 18));
@@ -224,6 +225,7 @@ function App() {
       setLiveStatus(`Analyzing live speech for ${emotion}.`);
       const result = await analyzeLiveAudio(backendBaseUrl, file, emotion, conversationSessionId ?? undefined);
       if (requestId !== liveRequestSequenceRef.current) return;
+      if (result === null) return;
       setConversationSessionId(result.sessionId ?? null);
       setAnalysisResult(result);
       setTranscriptEntries((currentEntries) => [{ id: chunkId, createdAt: getTimeLabel(), transcript: result.transcript, emotion }, ...currentEntries].slice(0, 6));
@@ -305,8 +307,6 @@ function App() {
       await client.leave();
       setJoined(false);
       setSession(null);
-      setTranscriptRows([]);
-      setLatestAgentText("");
       setLiveStatus("Join the channel to start the interactive meeting.");
       appendLog("Left the Agora channel.");
     } catch (error) {
@@ -358,17 +358,11 @@ function App() {
       renderLocalPreview(nextCameraTrack);
       setSession({ ...nextSession, uid: joinedUid });
       setJoined(true);
-      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${normalizedUid}.`);
-      await startAgentSession(selectedEmotionRef.current, {
-        sessionOverride: activeSession,
-        joinedOverride: true,
-      });
+      appendLog(`Publishing mic + camera to channel ${nextSession.channel} as ${joinedUid}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to join channel.";
       setConnectionError(message);
       appendLog(`Join failed: ${message}`);
-      await detachConversationalApi();
-      await disconnectRtm();
       cleanupLocalTracks();
       if (client) {
         try {
@@ -447,14 +441,6 @@ function App() {
     appendLog(nextEnabled ? "Microphone enabled." : "Microphone muted.");
   };
 
-  const openDebugViewer = () => {
-    const debugUrl = new URL(window.location.href);
-    debugUrl.searchParams.set("mode", "debug");
-    debugUrl.searchParams.set("channel", channelInput.trim() || envChannel);
-    debugUrl.searchParams.set("autojoin", "1");
-    window.open(debugUrl.toString(), "_blank", "noopener,noreferrer");
-  };
-
   const toggleEmotion = (emotion: SupportedEmotion) => {
     setAnalysisError(null);
     setSelectedEmotions((currentEmotions) => {
@@ -471,16 +457,16 @@ function App() {
     <main className="app-shell">
       <section className="hero-bar">
         <div className="hero-copy-block">
-          <p className="eyebrow">{isDebugMode ? "Support View" : "Emotion Call"}</p>
-          <h1>{isDebugMode ? "Realtime Viewer" : "Emotion Call Studio"}</h1>
-          <p className="hero-copy">{isDebugMode ? "Monitor a live Agora session in a clean viewer layout and confirm what another participant is publishing." : "Join once, keep talking naturally, and let the app continuously transcribe live speech into emotion-shaped replies."}</p>
+          <p className="eyebrow">Emotion Call</p>
+          <h1>Emotion Call Studio</h1>
+          <p className="hero-copy">Join once, keep talking naturally, and let the app continuously transcribe live speech into emotion-shaped replies.</p>
         </div>
       </section>
       <section className="meet-shell">
         <div className="stage-grid">
           <article className="call-tile">
             <div className="tile-topbar">
-              <div><span className="tile-label">You</span><strong className="tile-title">{isDebugMode ? "Viewer standby" : "Your camera preview"}</strong></div>
+              <div><span className="tile-label">You</span><strong className="tile-title">Your camera preview</strong></div>
               <span className="tile-badge">{cameraEnabled ? "Camera live" : "Camera idle"}</span>
             </div>
             <div ref={localContainerRef} className="video-stage" />
@@ -490,85 +476,62 @@ function App() {
               <div className="audio-meter-bars" aria-label={`Local microphone level ${localAudioLevel}`}>{localMeterSegments.map((active, index) => <span key={`local-meter-${index}`} className={active ? "audio-meter-bar active" : "audio-meter-bar"} />)}</div>
             </div>
           </article>
-          <article className="call-tile">
-            <div className="tile-topbar">
-              <div><span className="tile-label">Remote Feed</span><strong className="tile-title">What the other side publishes</strong></div>
-              <span className={remoteAudioLevel > 8 ? "tile-badge active" : "tile-badge"}>{remoteAudioStatus}</span>
-            </div>
-            <div ref={remoteContainerRef} className="video-stage remote-stage" />
-            <div className="video-overlay"><span>{joined ? "Subscribed to remote participants in this room" : "Join to start receiving remote media"}</span><strong>{audioSignalDetected ? "Signal detected" : "Waiting for signal"}</strong></div>
-            <div className="audio-meter-card">
-              <div className="audio-meter-header"><span>Remote Audio</span><strong>{remoteAudioStatus === "receiving" ? "Receiving" : "Idle"}</strong></div>
-              <div className="audio-meter-bars" aria-label={`Remote audio level ${remoteAudioLevel}`}>{remoteMeterSegments.map((active, index) => <span key={`remote-meter-${index}`} className={active ? "audio-meter-bar active remote" : "audio-meter-bar"} />)}</div>
-            </div>
-          </article>
         </div>
         <aside className="control-rail">
           <section className="panel">
-            <div className="panel-header"><div><p className="eyebrow">Call Setup</p><h2>{isDebugMode ? "Viewer controls" : "Setup your call"}</h2></div></div>
+            <div className="panel-header"><div><p className="eyebrow">Call Setup</p><h2>Setup your call</h2></div></div>
             <label className="field"><span>Room name</span><input value={channelInput} onChange={(event) => setChannelInput(event.target.value)} disabled={joined || connecting} /></label>
             <div className="control-row">
-              <button type="button" className="control-chip selected" onClick={joinChannel} disabled={joined || connecting}>{connecting ? "Connecting..." : isDebugMode ? "Join viewer" : "Join call"}</button>
+              <button type="button" className="control-chip selected" onClick={joinChannel} disabled={joined || connecting}>{connecting ? "Connecting..." : "Join call"}</button>
               <button type="button" className="control-chip" onClick={() => void leaveChannel()} disabled={!joined && !connecting}>Leave call</button>
             </div>
-            {!isDebugMode ? <><div className="control-row">
+            <div className="control-row">
               <button type="button" className={cameraEnabled ? "control-chip active" : "control-chip"} onClick={() => void toggleCamera()} disabled={!cameraTrack}>{cameraEnabled ? "Turn camera off" : "Turn camera on"}</button>
               <button type="button" className={micEnabled ? "control-chip active" : "control-chip"} onClick={() => void toggleMic()} disabled={!micTrack}>{micEnabled ? "Mute microphone" : "Enable microphone"}</button>
-            </div><button type="button" className="control-chip" onClick={openDebugViewer}>Open debug tab</button></> : null}
-            <dl className="meta-grid">
-              <div><dt>Mode</dt><dd>{mode}</dd></div>
-              <div><dt>Status</dt><dd>{joined ? "joined" : "idle"}</dd></div>
-              <div><dt>Session source</dt><dd>{session?.source ?? "not connected yet"}</dd></div>
-              <div><dt>UID</dt><dd>{String(session?.uid ?? "-")}</dd></div>
-            </dl>
+            </div>
             <div className="status-card"><span className={`status-dot ${combinedError ? "danger" : ""}`} /><p>{combinedError ? combinedError : joined ? `You are in ${session?.channel}. Live listening is ${isListeningLive ? "running" : "ready"} for ${selectedEmotions.join(", ")}.` : "Enter a room name, pick up to three emotions, and join when you are ready."}</p></div>
           </section>
-          {!isDebugMode ? <>
-            <section className="panel">
-              <div className="panel-header"><div><p className="eyebrow">Emotion Layer</p><h2>{currentEmotion.title}</h2></div><span className="tile-badge active">{isAnalyzing ? "Responding" : liveStatus}</span></div>
-              <div className="emotion-preview" style={{ ["--emotion-accent" as string]: currentEmotion.accent, ["--emotion-glow" as string]: currentEmotion.glow } as CSSProperties}>
-                <div className="emotion-orb orb-one" />
-                <div className="emotion-orb orb-two" />
-                <div className="emotion-card">
-                  <span className="emotion-mode">{currentEmotion.mood}</span>
-                  <strong>{currentEmotion.title}</strong>
-                  <div className="emotion-face">{currentEmotion.emoji}</div>
-                  <p>{currentEmotion.description}</p>
-                </div>
-              </div>
-              <div className="emotion-picker-grid emotion-picker-grid-tile">
-                {SUPPORTED_EMOTIONS.map((emotion) => {
-                  const config = EMOTIONS.find((entry) => entry.key === emotion) ?? EMOTIONS[0];
-                  const selected = selectedEmotions.includes(emotion);
-                  return <button key={emotion} type="button" className={selected ? "emotion-option selected" : "emotion-option"} onClick={() => toggleEmotion(emotion)}><span>{config.title}</span><small>{config.mood}</small></button>;
-                })}
-              </div>
-            </section>
-            <section className="panel">
-              <div className="panel-header"><div><p className="eyebrow">Live Response</p><h2>Latest AI output</h2></div></div>
-              {analysisResult ? <div className="stack-panel">
-                <article className="analysis-card analysis-card-wide"><p className="eyebrow">Transcript</p><p className="transcript">{analysisResult.transcript}</p></article>
-                <article className="analysis-card"><p className="eyebrow">{analysisResult.emotion}</p><p className="analysis-response">{analysisResult.reply}</p></article>
-              </div> : <p className="empty-copy">No live transcript yet. Join the room and start speaking.</p>}
-            </section>
-            <section className="panel">
-              <div className="panel-header"><div><p className="eyebrow">Transcript Chunks</p><h2>Recent segments</h2></div></div>
-              <div className="timeline-list">
-                {transcriptEntries.length === 0 ? <p className="empty-copy">No live chunks processed yet.</p> : transcriptEntries.map((entry) => (
-                  <article key={entry.id} className="timeline-card">
-                    <div className="timeline-meta"><strong>{entry.createdAt}</strong><span>{entry.emotion}</span></div>
-                    <p className="timeline-text">{entry.transcript}</p>
-                  </article>
-                ))}
-              </div>
-            </section>
-          </> : null}
           <section className="panel">
-            <div className="panel-header"><div><p className="eyebrow">Debug Log</p><h2>Session events</h2></div></div>
-            <div className="log-list">{logs.length === 0 ? <p className="empty-copy">No events yet.</p> : logs.map((entry) => <p key={entry} className="log-entry">{entry}</p>)}</div>
+            <div className="panel-header"><div><p className="eyebrow">Emotion Layer</p><h2>{currentEmotion.title}</h2></div><span className="tile-badge active">{isAnalyzing ? "Responding" : liveStatus}</span></div>
+            <div className="emotion-preview" style={{ ["--emotion-accent" as string]: currentEmotion.accent, ["--emotion-glow" as string]: currentEmotion.glow } as CSSProperties}>
+              <div className="emotion-orb orb-one" />
+              <div className="emotion-orb orb-two" />
+              <div className="emotion-card">
+                <span className="emotion-mode">{currentEmotion.mood}</span>
+                <strong>{currentEmotion.title}</strong>
+                <div className="emotion-face">{currentEmotion.emoji}</div>
+                <p>{currentEmotion.description}</p>
+              </div>
+            </div>
+            <div className="emotion-picker-grid emotion-picker-grid-tile">
+              {SUPPORTED_EMOTIONS.map((emotion) => {
+                const config = EMOTIONS.find((entry) => entry.key === emotion) ?? EMOTIONS[0];
+                const selected = selectedEmotions.includes(emotion);
+                return <button key={emotion} type="button" className={selected ? "emotion-option selected" : "emotion-option"} onClick={() => toggleEmotion(emotion)}><span>{config.title}</span><small>{config.mood}</small></button>;
+              })}
+            </div>
+          </section>
+          <section className="panel">
+            <div className="panel-header"><div><p className="eyebrow">Live Response</p><h2>Latest AI output</h2></div></div>
+            {analysisResult ? <div className="stack-panel">
+              <article className="analysis-card analysis-card-wide"><p className="eyebrow">Transcript</p><p className="transcript">{analysisResult.transcript}</p></article>
+              <article className="analysis-card"><p className="eyebrow">{analysisResult.emotion}</p><p className="analysis-response">{analysisResult.reply}</p></article>
+            </div> : <p className="empty-copy">No live transcript yet. Join the room and start speaking.</p>}
+          </section>
+          <section className="panel">
+            <div className="panel-header"><div><p className="eyebrow">Transcript Chunks</p><h2>Recent segments</h2></div></div>
+            <div className="timeline-list">
+              {transcriptEntries.length === 0 ? <p className="empty-copy">No live chunks processed yet.</p> : transcriptEntries.map((entry) => (
+                <article key={entry.id} className="timeline-card">
+                  <div className="timeline-meta"><strong>{entry.createdAt}</strong><span>{entry.emotion}</span></div>
+                  <p className="timeline-text">{entry.transcript}</p>
+                </article>
+              ))}
+            </div>
           </section>
         </aside>
       </section>
+      <div ref={remoteContainerRef} style={{ display: "none" }} aria-hidden="true" />
     </main>
   );
 }

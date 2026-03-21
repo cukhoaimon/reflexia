@@ -81,3 +81,37 @@ export async function stopAgoraAgent(backendBaseUrl: string, agentId: string) {
 
   return (await response.json()) as { status?: string };
 }
+
+export type AnalysisResponse = {
+  transcript: string;
+  emotion: string;
+  reply: string;
+  sessionId?: string | null;
+  toolEvents?: unknown[];
+};
+
+export async function analyzeLiveAudio(
+  backendBaseUrl: string,
+  audioFile: File,
+  emotion: string,
+  sessionId?: string
+): Promise<AnalysisResponse | null> {
+  const url = new URL("/analyze-audio/live", backendBaseUrl);
+  const formData = new FormData();
+  formData.append("file", audioFile);
+  formData.append("emotion", emotion);
+  if (sessionId) formData.append("sessionId", sessionId);
+
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    body: formData,
+  });
+
+  if (response.status === 204) return null;
+
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+
+  return (await response.json()) as AnalysisResponse;
+}
