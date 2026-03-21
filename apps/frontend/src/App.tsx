@@ -121,43 +121,6 @@ function App() {
   useEffect(() => { joinedRef.current = joined; }, [joined]);
   useEffect(() => { selectedEmotionsRef.current = selectedEmotions; }, [selectedEmotions]);
 
-  const renderEmptyState = (container: HTMLDivElement | null, message: string) => {
-    if (!container) {
-      return;
-    }
-
-    container.innerHTML = "";
-    const emptyState = document.createElement("p");
-    emptyState.className = "empty-state";
-    emptyState.textContent = message;
-    container.appendChild(emptyState);
-  };
-
-  const renderLocalVideo = (track: ICameraVideoTrack) => {
-    if (!localContainerRef.current) {
-      return;
-    }
-
-    localContainerRef.current.innerHTML = "";
-    const localPlayer = document.createElement("div");
-    localPlayer.className = "video-tile";
-    localContainerRef.current.appendChild(localPlayer);
-    track.play(localPlayer);
-  };
-
-  const clearVideoContainers = () => {
-    if (localContainerRef.current) {
-      localContainerRef.current.innerHTML = "";
-      renderEmptyState(
-        localContainerRef.current,
-        isDebugMode ? "Debug viewer does not capture local media." : "Join to start your local camera preview.",
-      );
-    }
-
-    if (remoteContainerRef.current) {
-      renderEmptyState(remoteContainerRef.current, "No remote tracks connected yet.");
-    }
-  };
 
   useEffect(() => {
     if (!client) return;
