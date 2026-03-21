@@ -1,9 +1,9 @@
 const fs = require("fs/promises");
 
-const { parseEmotions } = require("../utils/parseEmotions");
+const { parseEmotion } = require("../utils/parseEmotions");
 const { createHttpError } = require("../utils/httpError");
 const { transcribeAudio } = require("../services/speechService");
-const { generateEmotionResponses } = require("../services/aiService");
+const { generateEmotionReply } = require("../services/aiService");
 const { saveAnalysisResult } = require("../services/outputService");
 
 async function analyzeAudioRequest(req, persistOutput) {
@@ -11,17 +11,23 @@ async function analyzeAudioRequest(req, persistOutput) {
     throw createHttpError(400, "Audio file is required.");
   }
 
-  const emotions = parseEmotions(req.body.emotions);
+  const emotion = parseEmotion(req.body.emotion);
   const transcript = await transcribeAudio(req.file.path);
 
   if (!transcript) {
     throw createHttpError(422, "The audio was transcribed, but no text was returned.");
   }
 
-  const responses = await generateEmotionResponses(emotions, transcript);
+  const response = await generateEmotionReply(emotion, transcript, {
+    sessionId: req.body.sessionId,
+    persist: true
+  });
   const result = {
     transcript,
-    responses
+    emotion: response.emotion,
+    reply: response.text,
+    sessionId: response.sessionId,
+    toolEvents: response.toolEvents
   };
 
   if (!persistOutput) {
